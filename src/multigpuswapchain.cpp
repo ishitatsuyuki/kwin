@@ -317,64 +317,65 @@ std::optional<MultiGpuSwapchain::Ret> MultiGpuSwapchain::copyWithEGL(GraphicsBuf
         };
     }
 
-    EglContext *previousContext = EglContext::currentContext();
-    const auto restoreContext = qScopeGuard([previousContext]() {
-        if (previousContext) {
-            // TODO make the calling code responsible for this?
-            // If this makeCurrent fails, things might crash :/
-            previousContext->makeCurrent();
-        }
-    });
-    if (!m_copyContext || m_copyContext->isFailed() || !m_copyContext->makeCurrent()) {
+    if (!m_copyContext || m_copyContext->isFailed()) {
         handleGpuReset();
         return std::nullopt;
     }
-    std::unique_ptr<GLRenderTimeQuery> renderTime;
-    if (frame) {
-        renderTime = std::make_unique<GLRenderTimeQuery>(m_copyContext);
-        renderTime->begin();
-    }
-    m_currentEglSlot = m_eglSwapchain->acquire();
-    if (!m_currentEglSlot) {
-        m_journal.clear();
-        return std::nullopt;
-    }
-    auto sourceTex = m_copyContext->importDmaBufAsTexture(*buffer->dmabufAttributes());
-    if (!sourceTex) {
-        m_journal.clear();
-        return std::nullopt;
-    }
 
-    const Rect completeRect{QPoint(), m_size};
-    const Region toRender = (m_journal.accumulate(m_currentEglSlot->age(), completeRect) | damage) & completeRect;
-    m_journal.add(damage);
+    Ret ret;
+    const auto doCopy = [&]() {
+        std::unique_ptr<GLRenderTimeQuery> renderTime;
+        if (frame) {
+            renderTime = std::make_unique<GLRenderTimeQuery>(m_copyContext);
+            renderTime->begin();
+        }
+        m_currentEglSlot = m_eglSwapchain->acquire();
+        if (!m_currentEglSlot) {
+            m_journal.clear();
+            return false;
+        }
+        auto sourceTex = m_copyContext->importDmaBufAsTexture(*buffer->dmabufAttributes());
+        if (!sourceTex) {
+            m_journal.clear();
+            return false;
+        }
 
-    m_copyContext->pushFramebuffer(m_currentEglSlot->framebuffer());
-    // TODO when possible, use a blit instead of a shader for better performance?
-    ShaderBinder binder(sourceTex->target() == GL_TEXTURE_EXTERNAL_OES ? ShaderTrait::MapExternalTexture : ShaderTrait::MapTexture);
-    QMatrix4x4 proj;
-    proj.scale(1, -1);
-    proj.ortho(QRectF(QPointF(), buffer->size()));
-    binder.shader()->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, proj);
-    sourceTex->render(toRender, buffer->size());
-    m_copyContext->popFramebuffer();
-    EGLNativeFence fence(m_copyContext->displayObject());
-    m_eglSwapchain->release(m_currentEglSlot, fence.fileDescriptor().duplicate());
+        const Rect completeRect{QPoint(), m_size};
+        const Region toRender = (m_journal.accumulate(m_currentEglSlot->age(), completeRect) | damage) & completeRect;
+        m_journal.add(damage);
 
-    // destroy resources before the context switch
-    sourceTex.reset();
-    if (renderTime) {
-        renderTime->end();
-        frame->addRenderTimeQuery(std::move(renderTime));
-    }
-    if (releasePoint) {
-        releasePoint->addReleaseFence(fence.fileDescriptor());
-    }
-    return Ret{
-        .buffer = m_currentEglSlot->buffer(),
-        .sync = fence.takeFileDescriptor(),
-        .releasePoint = m_currentEglSlot->releasePoint(),
+        m_copyContext->pushFramebuffer(m_currentEglSlot->framebuffer());
+        // TODO when possible, use a blit instead of a shader for better performance?
+        ShaderBinder binder(sourceTex->target() == GL_TEXTURE_EXTERNAL_OES ? ShaderTrait::MapExternalTexture : ShaderTrait::MapTexture);
+        QMatrix4x4 proj;
+        proj.scale(1, -1);
+        proj.ortho(QRectF(QPointF(), buffer->size()));
+        binder.shader()->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, proj);
+        sourceTex->render(toRender, buffer->size());
+        m_copyContext->popFramebuffer();
+        EGLNativeFence fence(m_copyContext->displayObject());
+        m_eglSwapchain->release(m_currentEglSlot, fence.fileDescriptor().duplicate());
+
+        if (renderTime) {
+            renderTime->end();
+            frame->addRenderTimeQuery(std::move(renderTime));
+        }
+        if (releasePoint) {
+            releasePoint->addReleaseFence(fence.fileDescriptor());
+        }
+        ret = Ret{
+            .buffer = m_currentEglSlot->buffer(),
+            .sync = fence.takeFileDescriptor(),
+            .releasePoint = m_currentEglSlot->releasePoint(),
+        };
+        return true;
     };
+    if (m_copyContext->runOnContextThread(doCopy)) {
+        return ret;
+    } else {
+        handleGpuReset();
+        return std::nullopt;
+    }
 }
 
 void MultiGpuSwapchain::handleDeviceRemoved(RenderDevice *device)
@@ -387,15 +388,17 @@ void MultiGpuSwapchain::handleDeviceRemoved(RenderDevice *device)
 void MultiGpuSwapchain::deleteResources()
 {
     if (m_copyContext) {
-        const auto restoreContext = qScopeGuard([ctx = EglContext::currentContext()]() {
-            if (ctx) {
-                ctx->makeCurrent();
-            }
-        });
-        m_copyContext->makeCurrent();
-        m_currentEglSlot.reset();
-        m_eglSwapchain.reset();
-        m_copyContext.reset();
+        const auto cleanup = [this]() {
+            m_currentEglSlot.reset();
+            m_eglSwapchain.reset();
+            m_copyContext.reset();
+            return true;
+        };
+        if (!m_copyContext->runOnContextThread(cleanup)) {
+            // this won't actually delete the OpenGL resources,
+            // but it should only happen in a GPU reset
+            cleanup();
+        }
     }
     if (m_vulkanSwapchain) {
         m_currentVulkanSlot.reset();
