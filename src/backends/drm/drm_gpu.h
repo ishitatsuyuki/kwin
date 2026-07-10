@@ -137,7 +137,6 @@ private:
     DrmOutput *findOutput(quint32 connector);
     void removeOutput(DrmOutput *output);
     void initDrmResources();
-    void forgetBufferObject(QObject *buf);
     void doModeset();
     void setRenderDevice(RenderDevice *device);
     void updateRenderDevice();

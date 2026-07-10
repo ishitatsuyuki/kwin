@@ -11,6 +11,7 @@
 
 #include <QObject>
 #include <QSize>
+#include <set>
 #include <sys/types.h>
 #include <utility>
 
@@ -57,10 +58,8 @@ struct SinglePixelAttributes
  * references are dropped. You can use the isDropped() function to check whether the
  * buffer has been marked as destroyed.
  */
-class KWIN_EXPORT GraphicsBuffer : public QObject, public std::enable_shared_from_this<GraphicsBuffer>
+class KWIN_EXPORT GraphicsBuffer : public std::enable_shared_from_this<GraphicsBuffer>
 {
-    Q_OBJECT
-
 public:
     class Lock
     {
@@ -77,7 +76,7 @@ public:
     };
 
     explicit GraphicsBuffer();
-    ~GraphicsBuffer() override;
+    virtual ~GraphicsBuffer();
 
     bool isReferenced() const;
     std::shared_ptr<Lock> reference();
@@ -109,6 +108,24 @@ public:
      */
     void addReleasePoint(const std::shared_ptr<SyncReleasePoint> &releasePoint);
 
+    class AttachedResource
+    {
+    public:
+        explicit AttachedResource(GraphicsBuffer *buffer);
+        virtual ~AttachedResource();
+
+        void bufferDeleted();
+
+        GraphicsBuffer *m_buffer;
+
+    private:
+        virtual void handleBufferDeleted();
+
+        std::weak_ptr<GraphicsBuffer> m_bufferRef;
+    };
+    void attachResource(AttachedResource *resource);
+    void detachResource(AttachedResource *resource);
+
     static bool alphaChannelFromDrmFormat(uint32_t format);
 
 protected:
@@ -122,6 +139,7 @@ protected:
 
     std::weak_ptr<Lock> m_reference;
     std::vector<std::shared_ptr<SyncReleasePoint>> m_releasePoints;
+    std::set<AttachedResource *> m_resources;
 };
 
 /**
@@ -144,12 +162,34 @@ public:
     {
     }
 
+    GraphicsBufferRef(const std::weak_ptr<GraphicsBuffer> &buffer)
+    {
+        if (auto b = buffer.lock()) {
+            m_lock = b->reference();
+        }
+    }
+
     GraphicsBufferRef &operator=(const GraphicsBufferRef &other) = default;
     GraphicsBufferRef &operator=(GraphicsBufferRef &&other) = default;
 
     GraphicsBufferRef &operator=(GraphicsBuffer *buffer)
     {
         m_lock = buffer ? buffer->reference() : nullptr;
+        return *this;
+    }
+
+    GraphicsBufferRef &operator=(const std::weak_ptr<GraphicsBuffer> &buffer)
+    {
+        return operator=(buffer.lock());
+    }
+
+    GraphicsBufferRef &operator=(const std::shared_ptr<GraphicsBuffer> &buffer)
+    {
+        if (buffer) {
+            m_lock = buffer->reference();
+        } else {
+            m_lock.reset();
+        }
         return *this;
     }
 
