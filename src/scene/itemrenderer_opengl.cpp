@@ -111,7 +111,7 @@ void ItemRendererOpenGL::setBlendEnabled(bool enabled)
     m_blendingEnabled = enabled;
 }
 
-static RenderGeometry clipQuads(const Item *item, const ItemRendererOpenGL::RenderContext *context)
+static RenderGeometry clipQuads(const Item *item, const ItemRendererOpenGL::RenderContext *context, const Rect &deviceClip)
 {
     const WindowQuadList quads = item->quads();
 
@@ -125,11 +125,12 @@ static RenderGeometry clipQuads(const Item *item, const ItemRendererOpenGL::Rend
 
     // split all quads in bounding rect with the actual rects in the region
     for (const WindowQuad &quad : std::as_const(quads)) {
-        if (context->deviceClip != Region::infinite() && !context->hardwareClipping) {
+        if ((context->deviceClip != Region::infinite() || deviceClip != context->deviceRect) && !context->hardwareClipping) {
             // Scale to device coordinates, rounding as needed.
             const RectF deviceBounds = quad.bounds().scaled(scale).rounded();
 
-            for (const Rect &deviceClipRect : context->deviceClip.rects()) {
+            const Region clip = context->deviceClip & deviceClip;
+            for (const Rect &deviceClipRect : clip.rects()) {
                 const RectF relativeDeviceClipRect = RectF(deviceClipRect).translated(-itemToDeviceTranslation);
                 const RectF intersected = relativeDeviceClipRect.intersected(deviceBounds);
                 if (intersected.isValid()) {
@@ -150,7 +151,7 @@ static RenderGeometry clipQuads(const Item *item, const ItemRendererOpenGL::Rend
     return geometry;
 }
 
-void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, const std::function<bool(Item *)> &filter, const std::function<bool(Item *)> &holeFilter)
+void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, Rect deviceClip, const std::function<bool(Item *)> &filter, const std::function<bool(Item *)> &holeFilter)
 {
     bool hole = false;
     if (filter && filter(item)) {
@@ -178,12 +179,16 @@ void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, co
 
     context->opacityStack.push(context->opacityStack.top() * item->opacity());
 
+    if (auto clip = item->globalClipRect()) {
+        deviceClip &= clip->scaled(scale).translated(-context->viewportOrigin).rounded();
+    }
+
     for (Item *childItem : sortedChildItems) {
         if (childItem->z() >= 0) {
             break;
         }
         if (childItem->explicitVisible()) {
-            createRenderNode(childItem, context, filter, holeFilter);
+            createRenderNode(childItem, context, deviceClip, filter, holeFilter);
         }
     }
 
@@ -204,7 +209,7 @@ void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, co
 
     item->preprocess();
 
-    RenderGeometry geometry = clipQuads(item, context);
+    RenderGeometry geometry = clipQuads(item, context, deviceClip);
 
     if (auto shadowItem = qobject_cast<ShadowItem *>(item)) {
         if (!geometry.isEmpty()) {
@@ -221,6 +226,7 @@ void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, co
                     .renderingIntent = item->renderingIntent(),
                     .bufferReleasePoint = nullptr,
                     .paintHole = hole,
+                    .clipRect = deviceClip,
                 });
                 renderNode.geometry.postProcessTextureCoordinates(ninePatch->texture()->matrix(UnnormalizedCoordinates));
             }
@@ -240,6 +246,7 @@ void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, co
                     .renderingIntent = item->renderingIntent(),
                     .bufferReleasePoint = nullptr,
                     .paintHole = hole,
+                    .clipRect = deviceClip,
                 });
                 renderNode.geometry.postProcessTextureCoordinates(atlas->texture()->matrix(UnnormalizedCoordinates));
             }
@@ -261,6 +268,7 @@ void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, co
                     .paintHole = hole,
                     .hasFloatingPointColor = texture->isFloatingPoint(),
                     .layerDebugBox = m_debug.layerEnabled ? std::optional(item->rect()) : std::nullopt,
+                    .clipRect = deviceClip,
                 });
                 renderNode.geometry.postProcessTextureCoordinates(texture->planes().at(0)->matrix(UnnormalizedCoordinates));
                 if (surfaceItem->colorDescription()->yuvCoefficients() != YUVMatrixCoefficients::Identity) {
@@ -295,6 +303,7 @@ void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, co
                     .renderingIntent = item->renderingIntent(),
                     .bufferReleasePoint = texture->releasePoint(),
                     .paintHole = hole,
+                    .clipRect = deviceClip,
                 });
                 renderNode.geometry.postProcessTextureCoordinates(texture->planes()[0]->matrix(UnnormalizedCoordinates));
             }
@@ -321,6 +330,7 @@ void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, co
                 .borderThickness = thickness,
                 .borderColor = outline.color(),
                 .paintHole = hole,
+                .clipRect = deviceClip,
             });
         }
     }
@@ -330,7 +340,7 @@ void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, co
             continue;
         }
         if (childItem->explicitVisible()) {
-            createRenderNode(childItem, context, filter, holeFilter);
+            createRenderNode(childItem, context, deviceClip, filter, holeFilter);
         }
     }
 
@@ -376,12 +386,13 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
         .renderTargetScale = viewport.scale(),
         .viewportOrigin = viewport.scaledRenderRect().topLeft(),
         .renderOffset = viewport.renderOffset(),
+        .deviceRect = viewport.deviceRect(),
     };
 
     renderContext.transformStack.push(QMatrix4x4());
     renderContext.opacityStack.push(data.opacity());
 
-    createRenderNode(item, &renderContext, filter, holeFilter);
+    createRenderNode(item, &renderContext, viewport.deviceRect(), filter, holeFilter);
 
     int totalVertexCount = 0;
     for (const RenderNode &node : std::as_const(renderContext.renderNodes)) {
@@ -505,7 +516,9 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
             renderNode.textures[i]->bind();
         }
 
-        vbo->draw(scissorRegion, GL_TRIANGLES, renderNode.firstVertex,
+        const Rect renderTargetClip = viewport.transform().map(renderNode.clipRect, renderTarget.transformedSize());
+        const Region clippedScissor = scissorRegion & renderTargetClip;
+        vbo->draw(clippedScissor, GL_TRIANGLES, renderNode.firstVertex,
                   renderNode.vertexCount, renderContext.hardwareClipping);
 
         for (int i = 0; i < renderNode.textures.count() && !renderNode.paintHole; ++i) {
@@ -536,7 +549,7 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
             } else {
                 shader->setUniform(GLShader::ColorUniform::Color, QColor(50, 0, 0, 50));
             }
-            vbo->draw(scissorRegion, GL_TRIANGLES, renderNode.firstVertex,
+            vbo->draw(clippedScissor, GL_TRIANGLES, renderNode.firstVertex,
                       renderNode.vertexCount, renderContext.hardwareClipping);
         }
     }
