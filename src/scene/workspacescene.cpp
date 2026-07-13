@@ -508,7 +508,7 @@ double WorkspaceScene::desiredHdrHeadroom() const
 {
     double maxHeadroom = 1;
     for (const auto &item : stacking_order) {
-        if (!item->window()->frameGeometry().intersects(painted_delegate->viewport())) {
+        if (!item->boundingRect().intersects(painted_delegate->viewport())) {
             continue;
         }
         maxHeadroom = std::max(maxHeadroom, getDesiredHdrHeadroom(item));
@@ -598,15 +598,17 @@ static void accumulateRepaints(Item *item, SceneView *view, Region *windowRepain
 
 void WorkspaceScene::preparePaintGenericScreen()
 {
-    for (WindowItem *windowItem : std::as_const(stacking_order)) {
-        resetRepaintsHelper(windowItem, painted_delegate);
+    for (Item *item : std::as_const(stacking_order)) {
+        resetRepaintsHelper(item, painted_delegate);
 
         WindowPrePaintData data;
         data.mask = m_paintContext.mask;
 
-        effects->prePaintWindow(painted_delegate, windowItem->effectWindow(), data);
+        Window *window = itemToWindow[item];
+        effects->prePaintWindow(painted_delegate, window->effectWindow(), data);
         m_paintContext.phase2Data.append(Phase2Data{
-            .item = windowItem,
+            .window = window,
+            .item = item,
             .deviceRegion = Region::infinite(),
             .deviceOpaque = Region{},
             .mask = data.mask,
@@ -620,13 +622,15 @@ static void addOpaqueRegionRecursive(SceneView *view, Item *item, const std::opt
         return;
     }
     const std::optional<ClipCorner> corner = calculateClipCorner(item, parentCorner);
-    RegionF opaque = item->opaque();
-    if (corner.has_value()) {
-        opaque = corner->radius.clip(item->opaque(), corner->box);
-    }
-    const Rect deviceRect = snapToPixelGrid(view->mapToDeviceCoordinates(item->mapToView(item->rect(), view)));
-    for (const RectF &rect : opaque.rects()) {
-        ret |= snapToPixelGrid(view->mapToDeviceCoordinates(item->mapToView(rect, view))) & deviceRect;
+    if (view->shouldRenderItem(item) || view->shouldRenderHole(item)) {
+        RegionF opaque = item->opaque();
+        if (corner.has_value()) {
+            opaque = corner->radius.clip(item->opaque(), corner->box);
+        }
+        const Rect deviceRect = snapToPixelGrid(view->mapToDeviceCoordinates(item->mapToView(item->rect(), view)));
+        for (const RectF &rect : opaque.rects()) {
+            ret |= snapToPixelGrid(view->mapToDeviceCoordinates(item->mapToView(rect, view))) & deviceRect;
+        }
     }
     const auto children = item->childItems();
     for (Item *child : children) {
@@ -636,21 +640,18 @@ static void addOpaqueRegionRecursive(SceneView *view, Item *item, const std::opt
 
 void WorkspaceScene::preparePaintSimpleScreen()
 {
-    for (WindowItem *windowItem : std::as_const(stacking_order)) {
-        Window *window = windowItem->window();
+    for (Item *item : std::as_const(stacking_order)) {
+        Window *window = itemToWindow[item];
         WindowPrePaintData data;
         data.mask = m_paintContext.mask;
 
-        effects->prePaintWindow(painted_delegate, windowItem->effectWindow(), data);
+        effects->prePaintWindow(painted_delegate, window->effectWindow(), data);
 
-        Region opaque;
-        if (window->opacity() == 1.0 && !(data.mask & PAINT_WINDOW_TRANSLUCENT)) {
-            addOpaqueRegionRecursive(painted_delegate, windowItem, std::nullopt, opaque);
-        }
         m_paintContext.phase2Data.append(Phase2Data{
-            .item = windowItem,
+            .window = window,
+            .item = item,
             .deviceRegion = Region{},
-            .deviceOpaque = std::move(opaque),
+            .deviceOpaque = Region{},
             .mask = data.mask,
         });
     }
@@ -679,10 +680,8 @@ Region WorkspaceScene::collectDamage()
             m_paintContext.deviceDamage |= paintData.deviceRegion - opaque;
 
             // TODO make occlusion culling per item, rather than per window
-            const bool canCover = painted_delegate->shouldRenderItem(paintData.item->surfaceItem())
-                || painted_delegate->shouldRenderHole(paintData.item->surfaceItem());
-            if (!(paintData.mask & (PAINT_WINDOW_TRANSLUCENT | PAINT_WINDOW_TRANSFORMED)) && canCover) {
-                opaque += paintData.deviceOpaque;
+            if (!(paintData.mask & (PAINT_WINDOW_TRANSLUCENT | PAINT_WINDOW_TRANSFORMED))) {
+                addOpaqueRegionRecursive(painted_delegate, paintData.item, std::nullopt, opaque);
             }
         }
 
@@ -728,7 +727,7 @@ void WorkspaceScene::paintGenericScreen(const RenderTarget &renderTarget, const 
     m_renderer->renderBackground(renderTarget, viewport, Region::infinite());
 
     for (const Phase2Data &paintData : std::as_const(m_paintContext.phase2Data)) {
-        paintWindow(renderTarget, viewport, paintData.item, paintData.mask, paintData.deviceRegion);
+        paintWindow(renderTarget, viewport, paintData.window->effectWindow(), paintData.mask, paintData.deviceRegion);
     }
 
     const Rect bounds = viewport.mapToDeviceCoordinates(m_overlayItem->mapToScene(m_overlayItem->boundingRect())).toRect();
@@ -754,18 +753,14 @@ void WorkspaceScene::paintSimpleScreen(const RenderTarget &renderTarget, const R
             data->deviceRegion &= viewport.mapToDeviceCoordinatesAligned(data->item->mapToScene(data->item->boundingRect()));
 
             // TODO change effects API, so occlusion culling is per item, rather than per window
-            const bool canCover = painted_delegate->shouldRenderItem(data->item->surfaceItem())
-                || painted_delegate->shouldRenderHole(data->item->surfaceItem());
-            if (!(data->mask & PAINT_WINDOW_TRANSLUCENT) && canCover) {
-                visible -= data->deviceOpaque;
-            }
+            visible -= data->deviceOpaque;
         }
     }
 
     m_renderer->renderBackground(renderTarget, viewport, visible);
 
     for (const Phase2Data &paintData : std::as_const(m_paintContext.phase2Data)) {
-        paintWindow(renderTarget, viewport, paintData.item, paintData.mask, paintData.deviceRegion);
+        paintWindow(renderTarget, viewport, paintData.window->effectWindow(), paintData.mask, paintData.deviceRegion);
     }
 
     const Rect bounds = viewport.mapToDeviceCoordinates(m_overlayItem->mapToScene(m_overlayItem->boundingRect())).toRect();
@@ -779,37 +774,55 @@ void WorkspaceScene::paintSimpleScreen(const RenderTarget &renderTarget, const R
     }
 }
 
+static WindowItem *findWindowItem(Item *item)
+{
+    WindowItem *windowItem = qobject_cast<WindowItem *>(item);
+    // at the moment, effects items can only have one WindowItem as a child
+    while (!windowItem && !item->childItems().isEmpty()) {
+        item = item->childItems().front();
+        windowItem = qobject_cast<WindowItem *>(item);
+    }
+    Q_ASSERT(windowItem);
+    return windowItem;
+}
+
 void WorkspaceScene::createStackingOrder()
 {
     QList<Item *> items = m_containerItem->sortedChildItems();
     for (Item *item : std::as_const(items)) {
-        WindowItem *windowItem = static_cast<WindowItem *>(item);
+        if (!item->isVisible()) {
+            continue;
+        }
+        WindowItem *windowItem = findWindowItem(item);
         if (painted_delegate && painted_delegate->shouldHideWindow(windowItem->window())) {
             continue;
         }
-        if (windowItem->isVisible()) {
+        if (item->isVisible()) {
             windowItem->window()->ref();
-            stacking_order.append(windowItem);
+            stacking_order.append(item);
+            windowToItem[windowItem->window()] = item;
+            itemToWindow[item] = windowItem->window();
         }
     }
 }
 
 void WorkspaceScene::clearStackingOrder()
 {
-    for (WindowItem *windowItem : std::as_const(stacking_order)) {
-        windowItem->window()->unref();
+    for (const auto &[window, item] : windowToItem) {
+        window->unref();
     }
     stacking_order.clear();
+    windowToItem.clear();
 }
 
-void WorkspaceScene::paintWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, WindowItem *item, int mask, const Region &deviceRegion)
+void WorkspaceScene::paintWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *window, int mask, const Region &deviceRegion)
 {
     if (deviceRegion.isEmpty()) { // completely clipped
         return;
     }
 
     WindowPaintData data;
-    effects->paintWindow(renderTarget, viewport, item->effectWindow(), mask, deviceRegion, data);
+    effects->paintWindow(renderTarget, viewport, window, mask, deviceRegion, data);
 }
 
 // the function that'll be eventually called by paintWindow() above
@@ -822,8 +835,14 @@ void WorkspaceScene::finalPaintWindow(const RenderTarget &renderTarget, const Re
 void WorkspaceScene::finalDrawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion, WindowPaintData &data)
 {
     // TODO: Reconsider how the CrossFadeEffect captures the initial window contents to remove
-    // null pointer delegate checks in "should render item" and "should render hole" checks.
-    m_renderer->renderItem(renderTarget, viewport, w->windowItem(), mask, deviceRegion, data, [this](Item *item) {
+    // null pointer delegate checks in "should render item" and "should render hole" checks,
+    // and to be able to use windowToItem for the item
+    const auto items = m_containerItem->childItems();
+    const auto itemForWindow = std::ranges::find_if(items, [w](Item *item) {
+        return findWindowItem(item)->window() == w->window();
+    });
+    Q_ASSERT(itemForWindow != items.end());
+    m_renderer->renderItem(renderTarget, viewport, *itemForWindow, mask, deviceRegion, data, [this](Item *item) {
         return painted_delegate && !painted_delegate->shouldRenderItem(item);
     }, [this](Item *item) {
         return painted_delegate && painted_delegate->shouldRenderHole(item);

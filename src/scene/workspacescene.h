@@ -87,14 +87,15 @@ protected:
     // called after all effects had their paintWindow() called
     void finalPaintWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion, WindowPaintData &data);
     // shared implementation, starts painting the window
-    void paintWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, WindowItem *w, int mask, const Region &deviceRegion);
+    void paintWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion);
     // called after all effects had their drawWindow() called
     void finalDrawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &deviceRegion, WindowPaintData &data);
 
     // saved data for 2nd pass of optimized screen painting
     struct Phase2Data
     {
-        WindowItem *item = nullptr;
+        Window *window = nullptr;
+        Item *item = nullptr;
         Region deviceRegion;
         Region deviceOpaque;
         int mask = 0;
@@ -112,7 +113,9 @@ protected:
     SceneView *painted_delegate = nullptr;
 
     // windows in their stacking order
-    QList<WindowItem *> stacking_order;
+    QList<Item *> stacking_order;
+    std::unordered_map<Window *, Item *> windowToItem;
+    std::unordered_map<Item *, Window *> itemToWindow;
 
 private:
     void createDndIconItem();
