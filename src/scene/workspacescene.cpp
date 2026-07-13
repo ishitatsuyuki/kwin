@@ -252,10 +252,6 @@ static bool isCandidate(SurfaceItem *item, const Rect &deviceRect, bool isOpaque
     if (!item || !item->buffer() || !item->buffer()->dmabufAttributes()) {
         return false;
     }
-    // TODO make the compositor handle item opacity as well
-    if (item->opacity() < 1.0) {
-        return false;
-    }
     const bool updatesQuickly = item->frameTimeEstimation().transform([](const auto t) {
         return t < std::chrono::nanoseconds(1'000'000'000) / 20;
     }).value_or(false);
@@ -280,7 +276,8 @@ static bool isCandidate(SurfaceItem *item, const Rect &deviceRect, bool isOpaque
 static std::optional<bool> findOverlayCandidates(SceneView *view, Item *item, ssize_t maxTotalCount,
                                                  Region &occupied, Region &opaque, Region &effected,
                                                  QList<Item *> &overlays, QList<Item *> &underlays,
-                                                 QStack<ClipCorner> &corners, bool &needsCompositedScene)
+                                                 QStack<ClipCorner> &corners,
+                                                 double opacity, bool &needsCompositedScene)
 {
     if (opaque.contains(view->deviceRect())) {
         return true;
@@ -294,6 +291,11 @@ static std::optional<bool> findOverlayCandidates(SceneView *view, Item *item, ss
         // on an overlay/underlay, as we don't know what the effect does
         effected += mapToDevice(view, item, item->boundingRect());
         needsCompositedScene = true;
+        return std::nullopt;
+    }
+    opacity *= item->opacity();
+    if (opacity < 1.0) {
+        // TODO make the compositor handle this
         return std::nullopt;
     }
     maybePushCorners(item, corners);
@@ -310,7 +312,7 @@ static std::optional<bool> findOverlayCandidates(SceneView *view, Item *item, ss
         if (child->z() < 0) {
             break;
         }
-        if (auto ret = findOverlayCandidates(view, child, maxTotalCount, occupied, opaque, effected, overlays, underlays, corners, needsCompositedScene)) {
+        if (auto ret = findOverlayCandidates(view, child, maxTotalCount, occupied, opaque, effected, overlays, underlays, corners, opacity, needsCompositedScene)) {
             return ret;
         }
     }
@@ -366,7 +368,7 @@ static std::optional<bool> findOverlayCandidates(SceneView *view, Item *item, ss
 
     for (; it != children.rend(); it++) {
         Item *const child = *it;
-        if (auto ret = findOverlayCandidates(view, child, maxTotalCount, occupied, opaque, effected, overlays, underlays, corners, needsCompositedScene)) {
+        if (auto ret = findOverlayCandidates(view, child, maxTotalCount, occupied, opaque, effected, overlays, underlays, corners, opacity, needsCompositedScene)) {
             return ret;
         }
     }
@@ -445,7 +447,7 @@ QList<Item *> WorkspaceScene::layerCandidates(ssize_t maxTotalCount) const
             }
             continue;
         }
-        result = findOverlayCandidates(painted_delegate, item, maxTotalCount, occupied, opaque, effected, overlays, underlays, cornerStack, needsCompositedScene);
+        result = findOverlayCandidates(painted_delegate, item, maxTotalCount, occupied, opaque, effected, overlays, underlays, cornerStack, 1.0, needsCompositedScene);
         if (result.has_value()) {
             if (*result) {
                 break;
@@ -456,7 +458,7 @@ QList<Item *> WorkspaceScene::layerCandidates(ssize_t maxTotalCount) const
     }
 
     if (!result) {
-        result = findOverlayCandidates(painted_delegate, m_containerItem.get(), maxTotalCount, occupied, opaque, effected, overlays, underlays, cornerStack, needsCompositedScene);
+        result = findOverlayCandidates(painted_delegate, m_containerItem.get(), maxTotalCount, occupied, opaque, effected, overlays, underlays, cornerStack, 1.0, needsCompositedScene);
         if (result.has_value() && !*result) {
             return fallback();
         }
