@@ -111,41 +111,15 @@ void ItemRendererOpenGL::setBlendEnabled(bool enabled)
     m_blendingEnabled = enabled;
 }
 
-static RenderGeometry clipQuads(const Item *item, const ItemRendererOpenGL::RenderContext *context, const Rect &deviceClip)
+static RenderGeometry getQuads(const Item *item, const ItemRendererOpenGL::RenderContext *context)
 {
     const WindowQuadList quads = item->quads();
 
-    const qreal scale = context->renderTargetScale;
-    const QPointF itemToDeviceTranslation = context->transformStack.top().map(QPointF(0., 0.))
-        - context->viewportOrigin
-        + context->renderOffset;
-
     RenderGeometry geometry;
-    geometry.reserve(quads.count() * 6);
+    geometry.reserve(quads.count());
 
-    // split all quads in bounding rect with the actual rects in the region
     for (const WindowQuad &quad : std::as_const(quads)) {
-        if ((context->deviceClip != Region::infinite() || deviceClip != context->deviceRect) && !context->hardwareClipping) {
-            // Scale to device coordinates, rounding as needed.
-            const RectF deviceBounds = quad.bounds().scaled(scale).rounded();
-
-            const Region clip = context->deviceClip & deviceClip;
-            for (const Rect &deviceClipRect : clip.rects()) {
-                const RectF relativeDeviceClipRect = RectF(deviceClipRect).translated(-itemToDeviceTranslation);
-                const RectF intersected = relativeDeviceClipRect.intersected(deviceBounds);
-                if (intersected.isValid()) {
-                    if (deviceBounds == intersected) {
-                        // case 1: completely contains, include and do not check other rects
-                        geometry.appendWindowQuad(quad, scale);
-                        break;
-                    }
-                    // case 2: intersection
-                    geometry.appendSubQuad(quad, intersected, scale);
-                }
-            }
-        } else {
-            geometry.appendWindowQuad(quad, scale);
-        }
+        geometry.appendWindowQuad(quad, context->renderTargetScale);
     }
 
     return geometry;
@@ -209,7 +183,7 @@ void ItemRendererOpenGL::createRenderNode(Item *item, RenderContext *context, Re
 
     item->preprocess();
 
-    RenderGeometry geometry = clipQuads(item, context, deviceClip);
+    RenderGeometry geometry = getQuads(item, context);
 
     if (auto shadowItem = qobject_cast<ShadowItem *>(item)) {
         if (!geometry.isEmpty()) {
@@ -381,8 +355,7 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
     RenderContext renderContext{
         .projectionMatrix = viewport.projectionMatrix(),
         .rootTransform = data.toMatrix(viewport.scale()), // TODO: unify transforms
-        .deviceClip = (deviceRegion & renderTarget.transformedRect()),
-        .hardwareClipping = (deviceRegion != Region::infinite() && ((mask & Scene::PAINT_WINDOW_TRANSFORMED) || (mask & Scene::PAINT_SCREEN_TRANSFORMED))) || !viewport.renderOffset().isNull(),
+        .deviceClip = deviceRegion & renderTarget.transformedRect(),
         .renderTargetScale = viewport.scale(),
         .viewportOrigin = viewport.scaledRenderRect().topLeft(),
         .renderOffset = viewport.renderOffset(),
@@ -422,19 +395,15 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
     vbo->unmap();
     vbo->bindArrays();
 
-    if (renderContext.hardwareClipping) {
-        glEnable(GL_SCISSOR_TEST);
-    }
+    glEnable(GL_SCISSOR_TEST);
 
     // Make sure the blend function is set up correctly in case we will be doing blending
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
     // The scissor region must be in the render target local coordinate system.
     const QSize bufferOffset = renderTarget.transform().map(QSize(viewport.renderOffset().x(), viewport.renderOffset().y()));
-    Region scissorRegion = Rect(QPoint(bufferOffset.width(), bufferOffset.height()), renderTarget.size() - 2 * bufferOffset);
-    if (renderContext.hardwareClipping) {
-        scissorRegion &= viewport.transform().map(deviceRegion & renderTarget.transformedRect(), renderTarget.transformedSize());
-    }
+    const Rect offsetClip = Rect(QPoint(bufferOffset.width(), bufferOffset.height()), renderTarget.size() - 2 * bufferOffset);
+    const Region scissorRegion = viewport.transform().map(deviceRegion & renderTarget.transformedRect(), renderTarget.transformedSize()) & offsetClip;
 
     ShaderTraits lastTraits;
     GLShader *shader = nullptr;
@@ -519,7 +488,7 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
         const Rect renderTargetClip = viewport.transform().map(renderNode.clipRect, renderTarget.transformedSize());
         const Region clippedScissor = scissorRegion & renderTargetClip;
         vbo->draw(clippedScissor, GL_TRIANGLES, renderNode.firstVertex,
-                  renderNode.vertexCount, renderContext.hardwareClipping);
+                  renderNode.vertexCount, true);
 
         for (int i = 0; i < renderNode.textures.count() && !renderNode.paintHole; ++i) {
             glActiveTexture(GL_TEXTURE0 + i);
@@ -550,7 +519,7 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
                 shader->setUniform(GLShader::ColorUniform::Color, QColor(50, 0, 0, 50));
             }
             vbo->draw(clippedScissor, GL_TRIANGLES, renderNode.firstVertex,
-                      renderNode.vertexCount, renderContext.hardwareClipping);
+                      renderNode.vertexCount, true);
         }
     }
     if (shader) {
@@ -567,9 +536,7 @@ void ItemRendererOpenGL::renderItem(const RenderTarget &renderTarget, const Rend
 
     setBlendEnabled(false);
 
-    if (renderContext.hardwareClipping) {
-        glDisable(GL_SCISSOR_TEST);
-    }
+    glDisable(GL_SCISSOR_TEST);
 }
 
 void ItemRendererOpenGL::visualizeFractional(const RenderViewport &viewport, const Region &logicalRegion, const RenderContext &renderContext)
@@ -607,7 +574,7 @@ void ItemRendererOpenGL::visualizeFractional(const RenderViewport &viewport, con
         m_debug.fractionalShader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, renderContext.projectionMatrix * renderNode.transformMatrix);
 
         vbo->draw(logicalRegion, GL_TRIANGLES, renderNode.firstVertex,
-                  renderNode.vertexCount, renderContext.hardwareClipping);
+                  renderNode.vertexCount, true);
     }
 }
 
