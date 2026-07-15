@@ -57,20 +57,30 @@ struct SinglePixelAttributes
  * references are dropped. You can use the isDropped() function to check whether the
  * buffer has been marked as destroyed.
  */
-class KWIN_EXPORT GraphicsBuffer : public QObject
+class KWIN_EXPORT GraphicsBuffer : public QObject, public std::enable_shared_from_this<GraphicsBuffer>
 {
     Q_OBJECT
 
 public:
-    explicit GraphicsBuffer(QObject *parent = nullptr);
+    class Lock
+    {
+    public:
+        ~Lock();
+
+        const std::shared_ptr<GraphicsBuffer> &buffer() const;
+
+    private:
+        friend class GraphicsBuffer;
+        explicit Lock(const std::shared_ptr<GraphicsBuffer> &ref);
+
+        std::shared_ptr<GraphicsBuffer> m_buffer;
+    };
+
+    explicit GraphicsBuffer();
     ~GraphicsBuffer() override;
 
     bool isReferenced() const;
-    bool isDropped() const;
-
-    void ref();
-    void unref();
-    void drop();
+    std::shared_ptr<Lock> reference();
 
     enum MapFlag {
         Read = 0x1,
@@ -102,14 +112,15 @@ public:
     static bool alphaChannelFromDrmFormat(uint32_t format);
 
 protected:
+    friend class Lock;
+
     /**
      * called the first time the buffer is referenced after it's created or released
      */
     virtual void referenced();
     virtual void released();
 
-    int m_refCount = 0;
-    bool m_dropped = false;
+    std::weak_ptr<Lock> m_reference;
     std::vector<std::shared_ptr<SyncReleasePoint>> m_releasePoints;
 };
 
@@ -120,104 +131,55 @@ protected:
 class GraphicsBufferRef
 {
 public:
-    GraphicsBufferRef()
-        : m_buffer(nullptr)
-    {
-    }
-
+    GraphicsBufferRef() = default;
+    GraphicsBufferRef(const GraphicsBufferRef &copy) = default;
+    GraphicsBufferRef(GraphicsBufferRef &&move) = default;
     GraphicsBufferRef(GraphicsBuffer *buffer)
-        : m_buffer(buffer)
-    {
-        if (m_buffer) {
-            m_buffer->ref();
-        }
-    }
-
-    GraphicsBufferRef(const GraphicsBufferRef &other)
-        : m_buffer(other.m_buffer)
-    {
-        if (m_buffer) {
-            m_buffer->ref();
-        }
-    }
-
-    GraphicsBufferRef(GraphicsBufferRef &&other)
-        : m_buffer(std::exchange(other.m_buffer, nullptr))
+        : m_lock(buffer ? buffer->reference() : nullptr)
     {
     }
 
-    ~GraphicsBufferRef()
+    GraphicsBufferRef(const std::shared_ptr<GraphicsBuffer> &buffer)
+        : m_lock(buffer ? buffer->reference() : nullptr)
     {
-        if (m_buffer) {
-            m_buffer->unref();
-        }
+    }
+
+    GraphicsBufferRef &operator=(const GraphicsBufferRef &other) = default;
+    GraphicsBufferRef &operator=(GraphicsBufferRef &&other) = default;
+
+    GraphicsBufferRef &operator=(GraphicsBuffer *buffer)
+    {
+        m_lock = buffer ? buffer->reference() : nullptr;
+        return *this;
     }
 
     void reset()
     {
-        if (m_buffer) {
-            m_buffer->unref();
-            m_buffer = nullptr;
-        }
-    }
-
-    GraphicsBufferRef &operator=(const GraphicsBufferRef &other)
-    {
-        if (other.m_buffer) {
-            other.m_buffer->ref();
-        }
-        if (m_buffer) {
-            m_buffer->unref();
-        }
-        m_buffer = other.m_buffer;
-        return *this;
-    }
-
-    GraphicsBufferRef &operator=(GraphicsBufferRef &&other)
-    {
-        if (m_buffer) {
-            m_buffer->unref();
-        }
-        m_buffer = std::exchange(other.m_buffer, nullptr);
-        return *this;
-    }
-
-    GraphicsBufferRef &operator=(GraphicsBuffer *buffer)
-    {
-        if (m_buffer != buffer) {
-            if (m_buffer) {
-                m_buffer->unref();
-            }
-            if (buffer) {
-                buffer->ref();
-            }
-            m_buffer = buffer;
-        }
-        return *this;
+        m_lock.reset();
     }
 
     inline GraphicsBuffer *buffer() const
     {
-        return m_buffer;
+        return m_lock ? m_lock->buffer().get() : nullptr;
     }
 
     inline GraphicsBuffer *operator*() const
     {
-        return m_buffer;
+        return buffer();
     }
 
     inline GraphicsBuffer *operator->() const
     {
-        return m_buffer;
+        return buffer();
     }
 
     inline operator bool() const
     {
-        return m_buffer;
+        return m_lock != nullptr;
     }
 
 private:
-    GraphicsBuffer *m_buffer;
+    std::shared_ptr<GraphicsBuffer::Lock> m_lock;
 };
 
 } // namespace KWin

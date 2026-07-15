@@ -14,57 +14,43 @@
 namespace KWin
 {
 
-GraphicsBuffer::GraphicsBuffer(QObject *parent)
-    : QObject(parent)
+GraphicsBuffer::Lock::Lock(const std::shared_ptr<GraphicsBuffer> &buffer)
+    : m_buffer(buffer)
+{
+    m_buffer->referenced();
+}
+
+GraphicsBuffer::Lock::~Lock()
+{
+    m_buffer->released();
+}
+
+const std::shared_ptr<GraphicsBuffer> &GraphicsBuffer::Lock::buffer() const
+{
+    return m_buffer;
+}
+
+GraphicsBuffer::GraphicsBuffer()
 {
 }
 
 GraphicsBuffer::~GraphicsBuffer()
 {
-    Q_ASSERT(m_dropped);
 }
 
 bool GraphicsBuffer::isReferenced() const
 {
-    return m_refCount > 0;
+    return !m_reference.expired();
 }
 
-bool GraphicsBuffer::isDropped() const
+std::shared_ptr<GraphicsBuffer::Lock> GraphicsBuffer::reference()
 {
-    return m_dropped;
-}
-
-void GraphicsBuffer::ref()
-{
-    Q_ASSERT(QCoreApplication::instance()->thread() == thread());
-    ++m_refCount;
-    if (m_refCount == 1) {
-        referenced();
+    auto ret = m_reference.lock();
+    if (!ret) {
+        ret = std::shared_ptr<Lock>(new Lock(shared_from_this()));
+        m_reference = ret;
     }
-}
-
-void GraphicsBuffer::unref()
-{
-    Q_ASSERT(QCoreApplication::instance()->thread() == thread());
-    Q_ASSERT(m_refCount > 0);
-    --m_refCount;
-    if (!m_refCount) {
-        if (m_dropped) {
-            delete this;
-        } else {
-            m_releasePoints.clear();
-            released();
-        }
-    }
-}
-
-void GraphicsBuffer::drop()
-{
-    m_dropped = true;
-
-    if (!m_refCount) {
-        delete this;
-    }
+    return ret;
 }
 
 GraphicsBuffer::Map GraphicsBuffer::map(MapFlags flags)

@@ -125,7 +125,7 @@ GbmGraphicsBufferAllocator::~GbmGraphicsBufferAllocator()
 {
 }
 
-static GraphicsBuffer *allocateDumb(gbm_device *device, dev_t deviceId, const GraphicsBufferOptions &options)
+static std::shared_ptr<GraphicsBuffer> allocateDumb(gbm_device *device, dev_t deviceId, const GraphicsBufferOptions &options)
 {
     if (!options.modifiers.empty()) {
         return nullptr;
@@ -151,20 +151,20 @@ static GraphicsBuffer *allocateDumb(gbm_device *device, dev_t deviceId, const Gr
         return nullptr;
     }
 
-    return new DumbGraphicsBuffer(gbm_device_get_fd(device), createArgs.handle, DmaBufAttributes{
-                                                                                    .planeCount = 1,
-                                                                                    .width = options.size.width(),
-                                                                                    .height = options.size.height(),
-                                                                                    .format = options.format,
-                                                                                    .modifier = DRM_FORMAT_MOD_LINEAR,
-                                                                                    .device = deviceId,
-                                                                                    .fd = {FileDescriptor(primeFd), FileDescriptor{}, FileDescriptor{}, FileDescriptor{}},
-                                                                                    .offset = {0, 0, 0, 0},
-                                                                                    .pitch = {createArgs.pitch, 0, 0, 0},
-                                                                                });
+    return std::make_shared<DumbGraphicsBuffer>(gbm_device_get_fd(device), createArgs.handle, DmaBufAttributes{
+                                                                                                  .planeCount = 1,
+                                                                                                  .width = options.size.width(),
+                                                                                                  .height = options.size.height(),
+                                                                                                  .format = options.format,
+                                                                                                  .modifier = DRM_FORMAT_MOD_LINEAR,
+                                                                                                  .device = deviceId,
+                                                                                                  .fd = {FileDescriptor(primeFd), FileDescriptor{}, FileDescriptor{}, FileDescriptor{}},
+                                                                                                  .offset = {0, 0, 0, 0},
+                                                                                                  .pitch = {createArgs.pitch, 0, 0, 0},
+                                                                                              });
 }
 
-static GraphicsBuffer *allocateDmaBuf(gbm_device *device, dev_t deviceId, const GraphicsBufferOptions &options)
+static std::shared_ptr<GraphicsBuffer> allocateDmaBuf(gbm_device *device, dev_t deviceId, const GraphicsBufferOptions &options)
 {
     uint32_t flags = GBM_BO_USE_RENDERING;
     if (options.scanout) {
@@ -184,7 +184,7 @@ static GraphicsBuffer *allocateDmaBuf(gbm_device *device, dev_t deviceId, const 
                 gbm_bo_destroy(bo);
                 return nullptr;
             }
-            return new GbmGraphicsBuffer(std::move(attributes.value()), bo);
+            return std::make_shared<GbmGraphicsBuffer>(std::move(attributes.value()), bo);
         }
     }
 
@@ -210,7 +210,7 @@ static GraphicsBuffer *allocateDmaBuf(gbm_device *device, dev_t deviceId, const 
         } else {
             attributes->modifier = DRM_FORMAT_MOD_INVALID;
         }
-        return new GbmGraphicsBuffer(std::move(attributes.value()), bo);
+        return std::make_shared<GbmGraphicsBuffer>(std::move(attributes.value()), bo);
     }
 
     return nullptr;
@@ -248,7 +248,7 @@ static uint64_t align(uint64_t size, uint64_t minimum)
 }
 #endif
 
-static GraphicsBuffer *allocateUdmabuf(uint32_t drmFormat, const QSize &size)
+static std::shared_ptr<GraphicsBuffer> allocateUdmabuf(uint32_t drmFormat, const QSize &size)
 {
 #if HAVE_MEMFD && defined(Q_OS_LINUX)
     if (!GpuManager::self()->udmabuf().isValid()) {
@@ -289,13 +289,13 @@ static GraphicsBuffer *allocateUdmabuf(uint32_t drmFormat, const QSize &size)
     if (!dmabufAttributes) {
         return nullptr;
     }
-    return new UdmabufGraphicsBuffer(std::move(*dmabufAttributes), std::move(memoryMap));
+    return std::make_shared<UdmabufGraphicsBuffer>(std::move(*dmabufAttributes), std::move(memoryMap));
 #else
     return nullptr;
 #endif
 }
 
-GraphicsBuffer *GbmGraphicsBufferAllocator::allocate(const GraphicsBufferOptions &options)
+std::shared_ptr<GraphicsBuffer> GbmGraphicsBufferAllocator::allocate(const GraphicsBufferOptions &options)
 {
     if (options.software) {
         if (!options.scanout) {
