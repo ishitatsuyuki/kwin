@@ -1,0 +1,109 @@
+#version 450
+#extension GL_EXT_shader_image_load_formatted : require
+
+// Common source-over pipeline: one workgroup maps to one 16x16 output tile.
+// Every accepted layer is axis-aligned RGBA or a solid color, so the shader
+// only consumes the compact hot records.
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+struct HotLayer
+{
+    vec4 rect;
+    vec4 color;
+    vec4 textureCoordinatesX;
+    vec4 textureCoordinatesY;
+    vec4 effects;
+    uvec4 textureIndices;
+    uvec4 metadata;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer TileBuffer
+{
+    uint tileData[];
+};
+
+layout(set = 0, binding = 2) uniform image2D destination;
+
+layout(set = 0, binding = 3) uniform sampler2D textures[16];
+
+layout(std430, set = 0, binding = 4) readonly buffer DirtyTileBuffer
+{
+    uint dirtyTiles[];
+};
+
+layout(std430, set = 0, binding = 6) readonly buffer HotLayerBuffer
+{
+    HotLayer layers[];
+};
+
+layout(push_constant) uniform Parameters
+{
+    uint layerCount;
+    uint tilesWide;
+    uint flags;
+    uint dirtyTileCount;
+    vec4 background;
+    uint firstLayer;
+    uint lastLayer;
+    uvec2 padding;
+    vec4 outputLutParameters;
+} params;
+
+bool evaluateLayer(HotLayer layer, vec2 samplePosition, out vec4 source)
+{
+    if (samplePosition.x < layer.rect.x || samplePosition.x >= layer.rect.z
+            || samplePosition.y < layer.rect.y || samplePosition.y >= layer.rect.w) {
+        return false;
+    }
+    if (layer.metadata.x > 0u) {
+        vec3 outputPosition = vec3(samplePosition, 1.0);
+        vec2 coordinates = vec2(dot(layer.textureCoordinatesX.xyz, outputPosition),
+                                dot(layer.textureCoordinatesY.xyz, outputPosition));
+        source = texture(textures[layer.textureIndices.x], coordinates);
+        source.rgb *= layer.color.rgb * layer.color.a;
+        source.a *= layer.color.a;
+        float luminance = dot(source.rgb, vec3(0.2126, 0.7152, 0.0722));
+        source.rgb = mix(vec3(luminance), source.rgb, layer.effects.y) * layer.effects.x;
+    } else {
+        source = layer.color;
+    }
+    return true;
+}
+
+void main()
+{
+    uint dirtyTileIndex = gl_WorkGroupID.x;
+    if (dirtyTileIndex >= params.dirtyTileCount) {
+        return;
+    }
+    uint packedTile = dirtyTiles[dirtyTileIndex];
+    uint tileX = packedTile & 0xffffu;
+    uint tileY = packedTile >> 16;
+    uint tileIndex = tileY * params.tilesWide + tileX;
+    ivec2 pixel = ivec2(tileX, tileY) * 16 + ivec2(gl_LocalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(destination)))) {
+        return;
+    }
+
+    uint listBase = tileIndex * (params.layerCount + 1u);
+    uint tileLayerCount = tileData[listBase];
+    vec2 samplePosition = vec2(pixel) + vec2(0.5);
+    vec4 background = (params.flags & (1u << 1)) != 0u
+        ? imageLoad(destination, pixel)
+        : params.background;
+    vec4 result = vec4(0.0);
+    float remaining = 1.0;
+    for (int i = int(tileLayerCount) - 1; i >= 0 && remaining > 0.0; --i) {
+        uint layerIndex = tileData[listBase + 1u + uint(i)];
+        if (layerIndex < params.firstLayer || layerIndex >= params.lastLayer) {
+            continue;
+        }
+        vec4 source;
+        if (!evaluateLayer(layers[layerIndex], samplePosition, source)) {
+            continue;
+        }
+        result += source * remaining;
+        remaining *= 1.0 - source.a;
+    }
+    imageStore(destination, pixel, result + background * remaining);
+}

@@ -44,8 +44,8 @@ struct alignas(16) GpuLayer
     std::array<float, 4> inverseTransformX;
     std::array<float, 4> inverseTransformY;
     std::array<float, 4> clipRect;
-    std::array<float, 4> textureTransformX;
-    std::array<float, 4> textureTransformY;
+    std::array<float, 4> textureCoordinatesX;
+    std::array<float, 4> textureCoordinatesY;
     std::array<float, 4> effects;
     std::array<float, 4> roundedRect;
     std::array<float, 4> cornerRadii;
@@ -76,6 +76,17 @@ struct alignas(16) GpuLayer
     std::array<uint32_t, 4> metadata;
 };
 
+struct alignas(16) GpuHotLayer
+{
+    std::array<float, 4> rect;
+    std::array<float, 4> color;
+    std::array<float, 4> textureCoordinatesX;
+    std::array<float, 4> textureCoordinatesY;
+    std::array<float, 4> effects;
+    std::array<uint32_t, 4> textureIndices;
+    std::array<uint32_t, 4> metadata;
+};
+
 struct alignas(16) PushConstants
 {
     uint32_t layerCount;
@@ -90,6 +101,7 @@ struct alignas(16) PushConstants
 };
 
 static_assert(sizeof(GpuLayer) == 592);
+static_assert(sizeof(GpuHotLayer) == 112);
 static_assert(sizeof(PushConstants) == 64);
 
 constexpr uint32_t OutputLutEdgeSize = 33;
@@ -109,7 +121,7 @@ float fractionalVertex(const QPointF &position)
 bool validateShaderInterface(const QShader &shader, const QString &path)
 {
     const QShaderDescription description = shader.description();
-    std::array<bool, 6> bindings{};
+    std::array<bool, 7> bindings{};
     const auto recordBinding = [&path, &bindings](int descriptorSet, int binding, std::initializer_list<int> allowed) {
         if (descriptorSet != 0 || std::ranges::find(allowed, binding) == allowed.end()
             || binding < 0 || size_t(binding) >= bindings.size() || bindings[binding]) {
@@ -121,7 +133,7 @@ bool validateShaderInterface(const QShader &shader, const QString &path)
     };
 
     for (const QShaderDescription::StorageBlock &block : description.storageBlocks()) {
-        if (!recordBinding(block.descriptorSet, block.binding, {0, 1, 4, 5})) {
+        if (!recordBinding(block.descriptorSet, block.binding, {0, 1, 4, 5, 6})) {
             return false;
         }
     }
@@ -142,8 +154,13 @@ bool validateShaderInterface(const QShader &shader, const QString &path)
         return false;
     }
 
+    const bool simpleCompositeShader = path.contains(QStringLiteral("tile_composite_simple"));
     const bool compositeShader = path.contains(QStringLiteral("tile_composite"));
-    const std::array expectedBindings{true, true, compositeShader, compositeShader, true, compositeShader};
+    const std::array expectedBindings = simpleCompositeShader
+        ? std::array{false, true, true, true, true, false, true}
+        : compositeShader
+        ? std::array{true, true, true, true, true, true, false}
+        : std::array{false, true, false, false, true, false, true};
     if (bindings != expectedBindings) {
         qCWarning(KWIN_VULKAN) << "Vulkan compositor shader descriptor interface is incomplete" << path;
         return false;
@@ -259,6 +276,8 @@ VulkanCompositor::FrameResources::FrameResources()
     : descriptorPool(nullptr)
     , layerBuffer(nullptr)
     , layerMemory(nullptr)
+    , hotLayerBuffer(nullptr)
+    , hotLayerMemory(nullptr)
     , tileBuffer(nullptr)
     , tileMemory(nullptr)
     , dirtyTileBuffer(nullptr)
@@ -277,6 +296,7 @@ VulkanCompositor::VulkanCompositor(VulkanDevice *device)
     , m_pipelineLayout(nullptr)
     , m_preprocessPipeline(nullptr)
     , m_compositePipeline(nullptr)
+    , m_simpleCompositePipeline(nullptr)
     , m_sampler(nullptr)
     , m_fallbackImageView(nullptr)
 {
@@ -316,6 +336,7 @@ bool VulkanCompositor::initialize()
         {3, vk::DescriptorType::eCombinedImageSampler, MaximumTextureCount, vk::ShaderStageFlagBits::eCompute},
         {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
         {5, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
+        {6, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
     };
     auto [layoutResult, descriptorSetLayout] = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{
         vk::DescriptorSetLayoutCreateFlags{},
@@ -382,7 +403,8 @@ bool VulkanCompositor::createPipelines()
 {
     const auto preprocessModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_preprocess.comp.qsb"));
     const auto compositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite.comp.qsb"));
-    if (!preprocessModule || !compositeModule) {
+    const auto simpleCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_simple.comp.qsb"));
+    if (!preprocessModule || !compositeModule || !simpleCompositeModule) {
         return false;
     }
 
@@ -407,11 +429,13 @@ bool VulkanCompositor::createPipelines()
 
     auto preprocessPipeline = createPipeline(*preprocessModule);
     auto compositePipeline = createPipeline(*compositeModule);
-    if (!preprocessPipeline || !compositePipeline) {
+    auto simpleCompositePipeline = createPipeline(*simpleCompositeModule);
+    if (!preprocessPipeline || !compositePipeline || !simpleCompositePipeline) {
         return false;
     }
     m_preprocessPipeline = std::move(*preprocessPipeline);
     m_compositePipeline = std::move(*compositePipeline);
+    m_simpleCompositePipeline = std::move(*simpleCompositePipeline);
     return true;
 }
 
@@ -467,7 +491,8 @@ bool VulkanCompositor::ensureTarget(const QSize &size)
 bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
 {
     if (size == m_size && layerCount <= m_layerCapacity
-        && *m_frames[0].layerBuffer && *m_frames[0].tileBuffer && *m_frames[0].dirtyTileBuffer) {
+        && *m_frames[0].layerBuffer && *m_frames[0].hotLayerBuffer
+        && *m_frames[0].tileBuffer && *m_frames[0].dirtyTileBuffer) {
         return true;
     }
     if (size.isEmpty() || layerCount > std::numeric_limits<uint32_t>::max()) {
@@ -482,6 +507,8 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
         frame.inputImageViews.clear();
         frame.layerBuffer.clear();
         frame.layerMemory.clear();
+        frame.hotLayerBuffer.clear();
+        frame.hotLayerMemory.clear();
         frame.tileBuffer.clear();
         frame.tileMemory.clear();
         frame.dirtyTileBuffer.clear();
@@ -494,9 +521,17 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
 
     const uint32_t tilesWide = (size.width() + TileSize - 1) / TileSize;
     const uint32_t tilesHigh = (size.height() + TileSize - 1) / TileSize;
+    if (tilesWide > 0x10000u || tilesHigh > 0x10000u) {
+        return false;
+    }
     const vk::BufferCreateInfo layerBufferInfo{
         vk::BufferCreateFlags{},
         vk::DeviceSize(sizeof(GpuLayer)) * layerCapacity,
+        vk::BufferUsageFlagBits::eStorageBuffer,
+    };
+    const vk::BufferCreateInfo hotLayerBufferInfo{
+        vk::BufferCreateFlags{},
+        vk::DeviceSize(sizeof(GpuHotLayer)) * layerCapacity,
         vk::BufferUsageFlagBits::eStorageBuffer,
     };
     const vk::BufferCreateInfo tileBufferInfo{
@@ -515,7 +550,15 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
         vk::BufferUsageFlagBits::eStorageBuffer,
     };
     for (FrameResources &frame : m_frames) {
-        frame.layerMemory = m_device->allocateMemory(layerBufferInfo, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+        frame.layerMemory = m_device->allocateMemory(layerBufferInfo,
+                                                     vk::MemoryPropertyFlagBits::eDeviceLocal
+                                                         | vk::MemoryPropertyFlagBits::eHostVisible
+                                                         | vk::MemoryPropertyFlagBits::eHostCoherent);
+        if (!*frame.layerMemory) {
+            frame.layerMemory = m_device->allocateMemory(layerBufferInfo,
+                                                         vk::MemoryPropertyFlagBits::eHostVisible
+                                                             | vk::MemoryPropertyFlagBits::eHostCoherent);
+        }
         if (!*frame.layerMemory) {
             return false;
         }
@@ -525,6 +568,27 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
         }
         frame.layerBuffer = std::move(layerBuffer);
         if (frame.layerBuffer.bindMemory(frame.layerMemory, 0) != vk::Result::eSuccess) {
+            return false;
+        }
+
+        frame.hotLayerMemory = m_device->allocateMemory(hotLayerBufferInfo,
+                                                        vk::MemoryPropertyFlagBits::eDeviceLocal
+                                                            | vk::MemoryPropertyFlagBits::eHostVisible
+                                                            | vk::MemoryPropertyFlagBits::eHostCoherent);
+        if (!*frame.hotLayerMemory) {
+            frame.hotLayerMemory = m_device->allocateMemory(hotLayerBufferInfo,
+                                                            vk::MemoryPropertyFlagBits::eHostVisible
+                                                                | vk::MemoryPropertyFlagBits::eHostCoherent);
+        }
+        if (!*frame.hotLayerMemory) {
+            return false;
+        }
+        auto [hotLayerBufferResult, hotLayerBuffer] = m_device->logicalDevice().createBuffer(hotLayerBufferInfo);
+        if (hotLayerBufferResult != vk::Result::eSuccess) {
+            return false;
+        }
+        frame.hotLayerBuffer = std::move(hotLayerBuffer);
+        if (frame.hotLayerBuffer.bindMemory(frame.hotLayerMemory, 0) != vk::Result::eSuccess) {
             return false;
         }
 
@@ -586,7 +650,7 @@ bool VulkanCompositor::ensureDescriptorSets(uint32_t batchCount)
     m_currentFrame->descriptorSets.clear();
     m_currentFrame->descriptorPool.clear();
     const std::array poolSizes{
-        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 4 * capacity},
+        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 5 * capacity},
         vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, capacity},
         vk::DescriptorPoolSize{vk::DescriptorType::eCombinedImageSampler, MaximumTextureCount * capacity},
     };
@@ -619,6 +683,7 @@ bool VulkanCompositor::updateBufferDescriptors(uint32_t batchCount)
         return false;
     }
     const vk::DescriptorBufferInfo layerInfo{*m_currentFrame->layerBuffer, 0, vk::WholeSize};
+    const vk::DescriptorBufferInfo hotLayerInfo{*m_currentFrame->hotLayerBuffer, 0, vk::WholeSize};
     const vk::DescriptorBufferInfo tileInfo{*m_currentFrame->tileBuffer, 0, vk::WholeSize};
     const vk::DescriptorBufferInfo dirtyTileInfo{*m_currentFrame->dirtyTileBuffer, 0, vk::WholeSize};
     const vk::DescriptorBufferInfo outputLutInfo{*m_currentFrame->outputLutBuffer, 0, vk::WholeSize};
@@ -628,6 +693,7 @@ bool VulkanCompositor::updateBufferDescriptors(uint32_t batchCount)
             vk::WriteDescriptorSet{*m_currentFrame->descriptorSets[i], 1, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &tileInfo},
             vk::WriteDescriptorSet{*m_currentFrame->descriptorSets[i], 4, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &dirtyTileInfo},
             vk::WriteDescriptorSet{*m_currentFrame->descriptorSets[i], 5, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &outputLutInfo},
+            vk::WriteDescriptorSet{*m_currentFrame->descriptorSets[i], 6, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &hotLayerInfo},
         };
         m_device->logicalDevice().updateDescriptorSets(writes, {});
     }
@@ -877,6 +943,7 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
     std::vector<TextureBatch> batches(1);
     batches.front().firstLayer = 0;
     std::vector<GpuLayer> gpuLayers(layers.size());
+    std::vector<GpuHotLayer> gpuHotLayers(layers.size());
     for (size_t i = 0; i < layers.size(); ++i) {
         const VulkanCompositorLayer &layer = layers[i];
         if (!layer.transform.isAffine() || !layer.textureTransform.isAffine()) {
@@ -942,6 +1009,27 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         if (layer.clipRect) {
             outputRect = outputRect.intersected(clipRect);
         }
+        const uint32_t effectivePlaneCount = layer.texturePlaneCount == 0
+            ? (layer.texture ? 1u : 0u)
+            : layer.texturePlaneCount;
+        const bool axisAlignedFastPath = !layer.quadVertices
+            && !layer.roundedRect
+            && layer.outlineThickness <= 0
+            && layer.colorFilter != VulkanColorFilter::FractionalDebug
+            && layer.transform.m12() == 0.0
+            && layer.transform.m21() == 0.0;
+        if (axisAlignedFastPath) {
+            flags |= 1u << 8;
+        }
+        const bool simpleSourceOver = axisAlignedFastPath
+            && layer.blendMode == VulkanBlendMode::SourceOver
+            && layer.colorFilter == VulkanColorFilter::None
+            && !transformColor
+            && effectivePlaneCount <= 1
+            && !layer.auxiliaryTexture;
+        if (simpleSourceOver) {
+            flags |= 1u << 9;
+        }
         GpuLayer &gpuLayer = gpuLayers[i];
         gpuLayer.colorFilterMatrixX = matrixRow(layer.colorFilterMatrix, 0);
         gpuLayer.colorFilterMatrixY = matrixRow(layer.colorFilterMatrix, 1);
@@ -958,8 +1046,6 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         gpuLayer.inverseTransformX = {float(inverse.m11()), float(inverse.m21()), float(inverse.dx()), 0.0f};
         gpuLayer.inverseTransformY = {float(inverse.m12()), float(inverse.m22()), float(inverse.dy()), 0.0f};
         gpuLayer.clipRect = {float(clipRect.left()), float(clipRect.top()), float(clipRect.right()), float(clipRect.bottom())};
-        gpuLayer.textureTransformX = {float(layer.textureTransform.m11()), float(layer.textureTransform.m21()), float(layer.textureTransform.dx()), 0.0f};
-        gpuLayer.textureTransformY = {float(layer.textureTransform.m12()), float(layer.textureTransform.m22()), float(layer.textureTransform.dy()), 0.0f};
         if (layer.colorFilter == VulkanColorFilter::FractionalDebug) {
             const std::array<QPointF, 4> vertices = layer.quadVertices.value_or(std::array<QPointF, 4>{
                 localRect.topLeft(),
@@ -1101,6 +1187,41 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                 float(source.right() / textureSize.width()),
                 float(source.bottom() / textureSize.height()),
             };
+            if (layer.quadVertices) {
+                gpuLayer.textureCoordinatesX = {float(layer.textureTransform.m11()), float(layer.textureTransform.m21()), float(layer.textureTransform.dx()), 0.0f};
+                gpuLayer.textureCoordinatesY = {float(layer.textureTransform.m12()), float(layer.textureTransform.m22()), float(layer.textureTransform.dy()), 0.0f};
+            } else if (localRect.isEmpty()) {
+                gpuLayer.textureCoordinatesX = {};
+                gpuLayer.textureCoordinatesY = {};
+            } else {
+                const QRectF normalizedSource(gpuLayer.sourceRect[0],
+                                              gpuLayer.sourceRect[1],
+                                              gpuLayer.sourceRect[2] - gpuLayer.sourceRect[0],
+                                              gpuLayer.sourceRect[3] - gpuLayer.sourceRect[1]);
+                const auto outputToTexture = [&](const QPointF &outputPosition) {
+                    const QPointF localPosition = inverse.map(outputPosition);
+                    const QPointF normalizedPosition((localPosition.x() - localRect.left()) / localRect.width(),
+                                                     (localPosition.y() - localRect.top()) / localRect.height());
+                    const QPointF transformedPosition = layer.textureTransform.map(normalizedPosition);
+                    return QPointF(normalizedSource.left() + transformedPosition.x() * normalizedSource.width(),
+                                   normalizedSource.top() + transformedPosition.y() * normalizedSource.height());
+                };
+                const QPointF origin = outputToTexture(QPointF(0, 0));
+                const QPointF xUnit = outputToTexture(QPointF(1, 0));
+                const QPointF yUnit = outputToTexture(QPointF(0, 1));
+                gpuLayer.textureCoordinatesX = {
+                    float(xUnit.x() - origin.x()),
+                    float(yUnit.x() - origin.x()),
+                    float(origin.x()),
+                    0.0f,
+                };
+                gpuLayer.textureCoordinatesY = {
+                    float(xUnit.y() - origin.y()),
+                    float(yUnit.y() - origin.y()),
+                    float(origin.y()),
+                    0.0f,
+                };
+            }
             const QColor modulation = layer.color.toRgb();
             gpuLayer.color = {
                 float(modulation.redF()),
@@ -1118,6 +1239,14 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         } else {
             gpuLayer.color = premultiplied(layer.color, layer.opacity);
         }
+        GpuHotLayer &gpuHotLayer = gpuHotLayers[i];
+        gpuHotLayer.rect = gpuLayer.rect;
+        gpuHotLayer.color = gpuLayer.color;
+        gpuHotLayer.textureCoordinatesX = gpuLayer.textureCoordinatesX;
+        gpuHotLayer.textureCoordinatesY = gpuLayer.textureCoordinatesY;
+        gpuHotLayer.effects = gpuLayer.effects;
+        gpuHotLayer.textureIndices = gpuLayer.textureIndices;
+        gpuHotLayer.metadata = gpuLayer.metadata;
     }
     batches.back().lastLayer = uint32_t(layers.size());
     const uint32_t batchCount = uint32_t(batches.size());
@@ -1136,13 +1265,26 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
     if (applyOutputLut && !updateOutputLut(*outputColorPipeline)) {
         return std::nullopt;
     }
+    const bool useSimpleCompositePipeline = !applyOutputLut
+        && std::ranges::all_of(gpuHotLayers, [](const GpuHotLayer &layer) {
+        return (layer.metadata[2] & (1u << 9)) != 0u;
+    });
     if (!layers.empty()) {
-        auto [mapResult, data] = m_currentFrame->layerMemory.mapMemory(0, sizeof(GpuLayer) * layers.size());
-        if (mapResult != vk::Result::eSuccess) {
+        if (!useSimpleCompositePipeline) {
+            auto [mapResult, data] = m_currentFrame->layerMemory.mapMemory(0, sizeof(GpuLayer) * layers.size());
+            if (mapResult != vk::Result::eSuccess) {
+                return std::nullopt;
+            }
+            std::memcpy(data, gpuLayers.data(), sizeof(GpuLayer) * layers.size());
+            m_currentFrame->layerMemory.unmapMemory();
+        }
+
+        auto [hotMapResult, hotData] = m_currentFrame->hotLayerMemory.mapMemory(0, sizeof(GpuHotLayer) * layers.size());
+        if (hotMapResult != vk::Result::eSuccess) {
             return std::nullopt;
         }
-        std::memcpy(data, gpuLayers.data(), sizeof(GpuLayer) * layers.size());
-        m_currentFrame->layerMemory.unmapMemory();
+        std::memcpy(hotData, gpuHotLayers.data(), sizeof(GpuHotLayer) * layers.size());
+        m_currentFrame->hotLayerMemory.unmapMemory();
     }
 
     const uint32_t tilesWide = (size.width() + TileSize - 1) / TileSize;
@@ -1162,7 +1304,7 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                 const uint32_t tileIndex = tileY * tilesWide + tileX;
                 if (!markedTiles[tileIndex]) {
                     markedTiles[tileIndex] = true;
-                    dirtyTiles.push_back(tileIndex);
+                    dirtyTiles.push_back(tileX | (tileY << 16));
                 }
             }
         }
@@ -1206,6 +1348,17 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         0,
         vk::WholeSize,
     };
+    const vk::BufferMemoryBarrier2 hotLayerHostBarrier{
+        vk::PipelineStageFlagBits2::eHost,
+        vk::AccessFlagBits2::eHostWrite,
+        vk::PipelineStageFlagBits2::eComputeShader,
+        vk::AccessFlagBits2::eShaderRead,
+        vk::QueueFamilyIgnored,
+        vk::QueueFamilyIgnored,
+        *m_currentFrame->hotLayerBuffer,
+        0,
+        vk::WholeSize,
+    };
     const vk::BufferMemoryBarrier2 dirtyTileHostBarrier{
         vk::PipelineStageFlagBits2::eHost,
         vk::AccessFlagBits2::eHostWrite,
@@ -1228,7 +1381,7 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         0,
         vk::WholeSize,
     };
-    const std::array hostBarriers{hostBarrier, dirtyTileHostBarrier, outputLutHostBarrier};
+    const std::array hostBarriers{hostBarrier, hotLayerHostBarrier, dirtyTileHostBarrier, outputLutHostBarrier};
     commandBuffer.pipelineBarrier2(vk::DependencyInfo{{}, {}, hostBarriers, inputAcquireBarriers});
 
     auto preprocessQuery = VulkanRenderTimeQuery::begin(m_device,
@@ -1274,7 +1427,8 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                                                        commandBuffer,
                                                        m_device->computeQueueFamily(),
                                                        vk::PipelineStageFlagBits2::eAllCommands);
-    commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_compositePipeline);
+    commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute,
+                               useSimpleCompositePipeline ? m_simpleCompositePipeline : m_compositePipeline);
     for (uint32_t batchIndex = 0; batchIndex < batchCount; ++batchIndex) {
         const TextureBatch &batch = batches[batchIndex];
         pushConstants.firstLayer = batch.firstLayer;
@@ -1374,6 +1528,8 @@ void VulkanCompositor::releaseResources()
         frame.outputColorPipeline.reset();
         frame.layerBuffer.clear();
         frame.layerMemory.clear();
+        frame.hotLayerBuffer.clear();
+        frame.hotLayerMemory.clear();
         frame.descriptorSets.clear();
         frame.descriptorPool.clear();
         frame.descriptorCapacity = 0;
@@ -1384,6 +1540,7 @@ void VulkanCompositor::releaseResources()
     m_sampler.clear();
     m_preprocessPipeline.clear();
     m_compositePipeline.clear();
+    m_simpleCompositePipeline.clear();
     m_pipelineLayout.clear();
     m_descriptorSetLayout.clear();
     m_size = {};

@@ -198,6 +198,8 @@ private:
         uint32_t descriptorCapacity = 0;
         vk::raii::Buffer layerBuffer;
         vk::raii::DeviceMemory layerMemory;
+        vk::raii::Buffer hotLayerBuffer;
+        vk::raii::DeviceMemory hotLayerMemory;
         vk::raii::Buffer tileBuffer;
         vk::raii::DeviceMemory tileMemory;
         vk::raii::Buffer dirtyTileBuffer;
@@ -246,6 +248,7 @@ private:
     vk::raii::PipelineLayout m_pipelineLayout;
     vk::raii::Pipeline m_preprocessPipeline;
     vk::raii::Pipeline m_compositePipeline;
+    vk::raii::Pipeline m_simpleCompositePipeline;
     vk::raii::Sampler m_sampler;
     std::array<FrameResources, FrameResourceCount> m_frames;
     FrameResources *m_currentFrame = nullptr;

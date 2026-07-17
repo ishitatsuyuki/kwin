@@ -269,6 +269,7 @@ qt_add_shaders(kwin "vulkan_compute_shaders"
     FILES
         vulkan/shaders/tile_preprocess.comp
         vulkan/shaders/tile_composite.comp
+        vulkan/shaders/tile_composite_simple.comp
 )
 
 target_link_libraries(kwin

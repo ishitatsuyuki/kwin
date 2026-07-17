@@ -14,8 +14,8 @@ struct Layer
     vec4 inverseTransformX;
     vec4 inverseTransformY;
     vec4 clipRect;
-    vec4 textureTransformX;
-    vec4 textureTransformY;
+    vec4 textureCoordinatesX;
+    vec4 textureCoordinatesY;
     vec4 effects;
     vec4 roundedRect;
     vec4 cornerRadii;
@@ -713,38 +713,52 @@ vec3 applyOutputLut(vec3 color)
 
 bool evaluateLayer(Layer layer, vec2 samplePosition, out vec4 source, out float coverage)
 {
-    if ((layer.metadata.z & 1u) != 0u
-            && (samplePosition.x < layer.clipRect.x || samplePosition.x >= layer.clipRect.z
-                || samplePosition.y < layer.clipRect.y || samplePosition.y >= layer.clipRect.w)) {
-        return false;
-    }
     vec3 outputPosition = vec3(samplePosition, 1.0);
-    vec2 localPosition = vec2(dot(layer.inverseTransformX.xyz, outputPosition),
-                              dot(layer.inverseTransformY.xyz, outputPosition));
-    vec4 localRect = layer.localRect;
-    vec2 position;
-    if ((layer.metadata.z & (1u << 5)) != 0u) {
-        if (!quadCoordinates(layer, localPosition, position)) {
+    vec2 localPosition = vec2(0.0);
+    vec2 position = vec2(0.0);
+    if ((layer.metadata.z & (1u << 8)) != 0u) {
+        if (samplePosition.x < layer.rect.x || samplePosition.x >= layer.rect.z
+                || samplePosition.y < layer.rect.y || samplePosition.y >= layer.rect.w) {
             return false;
         }
+        coverage = 1.0;
     } else {
-        if (localPosition.x < localRect.x || localPosition.x >= localRect.z
-                || localPosition.y < localRect.y || localPosition.y >= localRect.w) {
+        if ((layer.metadata.z & 1u) != 0u
+                && (samplePosition.x < layer.clipRect.x || samplePosition.x >= layer.clipRect.z
+                    || samplePosition.y < layer.clipRect.y || samplePosition.y >= layer.clipRect.w)) {
             return false;
         }
-        position = (localPosition - localRect.xy) / (localRect.zw - localRect.xy);
-    }
+        localPosition = vec2(dot(layer.inverseTransformX.xyz, outputPosition),
+                             dot(layer.inverseTransformY.xyz, outputPosition));
+        vec4 localRect = layer.localRect;
+        if ((layer.metadata.z & (1u << 5)) != 0u) {
+            if (!quadCoordinates(layer, localPosition, position)) {
+                return false;
+            }
+        } else {
+            if (localPosition.x < localRect.x || localPosition.x >= localRect.z
+                    || localPosition.y < localRect.y || localPosition.y >= localRect.w) {
+                return false;
+            }
+            position = (localPosition - localRect.xy) / (localRect.zw - localRect.xy);
+        }
 
-    coverage = shapeCoverage(layer, localPosition);
-    if (coverage <= 0.0) {
-        return false;
+        coverage = shapeCoverage(layer, localPosition);
+        if (coverage <= 0.0) {
+            return false;
+        }
     }
     vec2 coordinates = vec2(0.0);
     if (layer.metadata.x > 0u) {
-        vec3 texturePosition = vec3(position, 1.0);
-        position = vec2(dot(layer.textureTransformX.xyz, texturePosition),
-                        dot(layer.textureTransformY.xyz, texturePosition));
-        coordinates = mix(layer.sourceRect.xy, layer.sourceRect.zw, position);
+        if ((layer.metadata.z & (1u << 5)) != 0u) {
+            vec3 texturePosition = vec3(position, 1.0);
+            position = vec2(dot(layer.textureCoordinatesX.xyz, texturePosition),
+                            dot(layer.textureCoordinatesY.xyz, texturePosition));
+            coordinates = mix(layer.sourceRect.xy, layer.sourceRect.zw, position);
+        } else {
+            coordinates = vec2(dot(layer.textureCoordinatesX.xyz, outputPosition),
+                               dot(layer.textureCoordinatesY.xyz, outputPosition));
+        }
         if (layer.metadata.x == 1u) {
             source = sampleTexture(layer.textureIndices.x, coordinates);
         } else if (layer.metadata.x == 2u) {
@@ -790,9 +804,10 @@ void main()
     if (dirtyTileIndex >= params.dirtyTileCount) {
         return;
     }
-    uint tileIndex = dirtyTiles[dirtyTileIndex];
-    uint tileX = tileIndex % params.tilesWide;
-    uint tileY = tileIndex / params.tilesWide;
+    uint packedTile = dirtyTiles[dirtyTileIndex];
+    uint tileX = packedTile & 0xffffu;
+    uint tileY = packedTile >> 16;
+    uint tileIndex = tileY * params.tilesWide + tileX;
     ivec2 pixel = ivec2(tileX, tileY) * 16 + ivec2(gl_LocalInvocationID.xy);
     ivec2 outputSize = imageSize(destination);
     if (any(greaterThanEqual(pixel, outputSize))) {
