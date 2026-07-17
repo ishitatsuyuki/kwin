@@ -49,6 +49,7 @@ test unless the item explicitly says otherwise.
 - [x] Vulkan dma-buf output-layer swapchain and buffer-age tracking
 - [x] DRM backend (compiled; virtual DRM coverage, physical KMS run still needed)
 - [x] Wayland nested backend (live-presented to a KWin host under Vulkan validation)
+- [x] Advertise renderer linux-dmabuf feedback so Wayland EGL and Xwayland GL clients stay GPU-accelerated in nested Vulkan sessions
 - [x] X11 nested backend with DRI3 Present wait fences (compiled; live DRI3 host presentation still needed)
 - [x] Virtual backend
 - [x] Direct scanout and overlay-plane interaction (compiled; physical KMS run still needed)
@@ -91,7 +92,7 @@ test unless the item explicitly says otherwise.
 - [x] Live Qt Quick window-thumbnail scene through a Vulkan virtual output
 - [x] Legacy GL fragment-shader bridge with two-way Vulkan/EGL native-fence synchronization, orientation-sensitive pixels, and late shader installation
 - [x] GPU preprocessing/composition microbenchmark
-- [x] Overdraw-heavy GPU-time comparison with the OpenGL backend (translucent worst case remains slower on Navi 10; opaque front-to-back termination is substantially faster before scene occlusion)
+- [x] Overdraw-heavy GPU-time comparison with the OpenGL backend (optimized common compute is slightly faster at 16/64 translucent layers on Navi 10; opaque front-to-back termination is substantially faster before scene occlusion)
 - [x] Async-compute latency benchmark under graphics contention, with a forced-graphics-queue comparison mode
 
 ### Pre-optimization baseline (2026-07-17)
@@ -152,19 +153,79 @@ raster workload, but independent scheduling avoids enough graphics-queue delay
 to finish 16.5% sooner. Both complete benchmark runs passed 13 tests with no
 current-boot kernel GPU-reset, timeout, fault, or device-loss report.
 
+### First optimization pass (2026-07-17)
+
+Commit `9ec59a82e4` integrates the first profiler-guided optimization pass on the
+same Navi 10 system and Debug build as the baseline. It adds a 112-byte hot
+layer record, prefers host-visible device-local memory for layer records,
+precomposes output-pixel-to-UV transforms, packs dirty-tile coordinates, and
+routes axis-aligned RGBA/solid source-over scenes without output LUTs through a
+separate compact pipeline. General color-managed, YUV, filtered, rounded,
+quad, and non-source-over scenes retain the full visual-model pipeline; their
+axis-aligned geometry can still skip inverse-transform coverage work.
+
+| 1920x1080 scene | Baseline Vulkan GPU | Optimized Vulkan GPU (preprocess + composite) | Change | OpenGL GPU |
+| --- | ---: | ---: | ---: | ---: |
+| 1 translucent layer | 0.210 ms | 0.086 ms (0.005 + 0.081) | -59.0% | 0.030 ms |
+| 16 translucent layers | 1.254 ms | 0.426 ms (0.015 + 0.411) | -66.0% | 0.436 ms |
+| 64 translucent layers | 5.099 ms | 1.625 ms (0.070 + 1.554) | -68.1% | 1.731 ms |
+| 64 opaque layers | 0.304 ms | 0.154 ms (0.069 + 0.085) | -49.3% | 1.731 ms |
+
+The optimized compute path is 2.3% faster than the OpenGL loop at 16
+translucent layers and 6.1% faster at 64 layers. The one-layer case remains
+slower because fixed dispatch, preprocessing, and synchronization costs
+dominate. Opaque early termination is now about 11.2x faster than the
+unoccluded OpenGL loop.
+
+The contention medians use the same reporting method as the baseline table:
+
+| Queued raster layers | Baseline median / p95 / GPU | Optimized median / p95 / GPU | Median change |
+| --- | ---: | ---: | ---: |
+| 0 | 1.540 / 1.560 / 1.254 ms | 0.879 / 0.907 / 0.426 ms | -42.9% |
+| 16 | 1.701 / 1.725 / 1.399 ms | 0.946 / 0.962 / 0.495 ms | -44.4% |
+| 64 | 2.606 / 2.644 / 2.311 ms | 2.120 / 2.139 / 1.665 ms | -18.6% |
+
+`RADV_DEBUG=nocache,shaders` was used for consistent NIR and ISA dumps. The
+general shader still reaches `v83`/`s105`, while the separate common pipeline
+reaches only `v21`/`s46` and has 18 basic blocks instead of roughly 2,400.
+This register/code-size isolation accounts for most of the improvement.
+
+Experiments are preserved on `experiment/vulkan-*` branches. Results so far:
+
+- Accepted: device-local host-visible layer records, direct UV as a prerequisite
+  to the axis-aligned path, compact hot records, the separate simple pipeline,
+  and packed dirty-tile coordinates.
+- Rejected: wave32 (about 20% slower), 16x8 and 8x8 one-pixel workgroups
+  (noise-sized isolated changes but 6-20% worse under heavy graphics
+  contention), and hot-field reordering without reducing the 592-byte stride
+  (about 3% slower).
+- Rejected: two-layer blocked source-over. It increased the simple shader from
+  `v21` to `v31` and regressed 16/64-layer composition by about 18-19%.
+- Neutral alone: direct UV precomposition; coverage kept the inverse-transform
+  work live until the axis-aligned path was introduced.
+
 ## Planned optimization passes
 
 Hierarchical binning and prefix-summed tile compaction are intentionally
 deferred until profiling demonstrates that their complexity is justified.
 
 - [x] Dirty-tile preprocessing and composition
+- [x] Packed dirty-tile coordinates without shader integer division/modulo
 - [x] Front-to-back source-over composition with opaque-layer early termination
+- [x] Precomposed output-pixel-to-UV transforms
+- [x] Axis-aligned RGBA/solid source-over pipeline with compact hot records
+- [x] Prefer host-visible device-local layer records with a compatible host-visible fallback
+- [x] Workgroup and subgroup-size sweep on Navi 10 (16x16 wave64 retained)
+- [x] Two-layer blocked source-over evaluation measured and rejected on Navi 10
 - [x] Fixed-stride layer-index lists beyond 64 layers
 - [ ] Compact prefix-summed tile-list allocation (deferred)
 - [ ] Hierarchical AABB binning (deferred)
 - [ ] Prefix-sum tile-list construction (deferred)
 - [x] Texture descriptor batching without a fixed per-scene texture limit
 - [ ] Texture descriptor indexing/bindless sampling
+- [ ] Simple source-over pipeline variant with color management
+- [ ] Move target-global color data out of full per-layer records
+- [ ] Replace the duplicated full-record fallback with a true cold-only buffer
 - [ ] Pipeline and descriptor reuse across outputs
 - [x] Frame overlap without per-frame queue-idle waits (three independently fenced frame-resource sets)
 
@@ -192,5 +253,5 @@ bridge asynchronous; implementations without them fall back to blocking sync-fd
 waits and `glFinish()` for correctness. Native in-tree effects continue to use
 compute filters and do not pay the cross-API cost. The validation integration test uses an orientation-sensitive
 two-color window and installs a custom channel-swapping shader after snapshot
-capture. The current full runs pass 42 compositor tests and 14 live integration
+capture. The current full runs pass 42 compositor tests and 15 live integration
 tests with no validation messages or current-boot kernel GPU-reset report.
