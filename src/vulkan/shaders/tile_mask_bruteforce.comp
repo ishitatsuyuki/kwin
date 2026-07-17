@@ -1,0 +1,104 @@
+#version 450
+
+// Low-layer-count path: test AABBs directly, but emit the same summarized
+// layer-mask format as the hierarchical prefix scan.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct HotLayer
+{
+    vec4 rect;
+    vec4 color;
+    vec4 textureCoordinatesX;
+    vec4 textureCoordinatesY;
+    vec4 effects;
+    uvec4 textureIndices;
+    uvec4 metadata;
+};
+
+layout(std430, set = 0, binding = 1) writeonly buffer TileBuffer
+{
+    uint tileData[];
+};
+
+layout(std430, set = 0, binding = 4) readonly buffer DirtyTileBuffer
+{
+    uint dirtyTiles[];
+};
+
+layout(std430, set = 0, binding = 6) readonly buffer HotLayerBuffer
+{
+    HotLayer layers[];
+};
+
+layout(push_constant) uniform Parameters
+{
+    uint layerCount;
+    uint tilesWide;
+    uint flags;
+    uint dirtyTileCount;
+    vec4 background;
+    uint firstLayer;
+    uint lastLayer;
+    uvec2 outputSize;
+    vec4 outputLutParameters;
+} params;
+
+void main()
+{
+    uint dirtyTileIndex = gl_GlobalInvocationID.x;
+    if (dirtyTileIndex >= params.dirtyTileCount) {
+        return;
+    }
+    uint packedTile = dirtyTiles[dirtyTileIndex];
+    uint tileX = packedTile & 0xffffu;
+    uint tileY = packedTile >> 16;
+    uint tileIndex = tileY * params.tilesWide + tileX;
+    vec2 tileMin = vec2(tileX, tileY) * 16.0;
+    vec2 tileMax = min(tileMin + vec2(16.0), vec2(params.outputSize));
+    uint wordCount = (params.layerCount + 31u) / 32u;
+    uint summaryWordCount = (wordCount + 31u) / 32u;
+    uint tileBase = tileIndex * (summaryWordCount + wordCount);
+    bool discardLowerLayers = false;
+
+    for (int summaryWord = int(summaryWordCount) - 1; summaryWord >= 0; --summaryWord) {
+        uint nonemptyWords = 0u;
+        uint firstWord = uint(summaryWord) * 32u;
+        uint endWord = min(firstWord + 32u, wordCount);
+        for (int word = int(endWord) - 1; word >= int(firstWord); --word) {
+            uint present = 0u;
+            uint opaque = 0u;
+            uint firstLayer = uint(word) * 32u;
+            uint endLayer = min(firstLayer + 32u, params.layerCount);
+            for (uint layerIndex = firstLayer; layerIndex < endLayer; ++layerIndex) {
+                HotLayer layer = layers[layerIndex];
+                bool intersects = layer.rect.x < tileMax.x && layer.rect.z > tileMin.x
+                    && layer.rect.y < tileMax.y && layer.rect.w > tileMin.y;
+                if (!intersects) {
+                    continue;
+                }
+                uint bit = 1u << (layerIndex & 31u);
+                present |= bit;
+                bool fullyCovers = (layer.metadata.z & (1u << 13)) != 0u
+                    && layer.rect.x <= tileMin.x && layer.rect.z >= tileMax.x
+                    && layer.rect.y <= tileMin.y && layer.rect.w >= tileMax.y;
+                if (fullyCovers) {
+                    opaque |= bit;
+                }
+            }
+            if (discardLowerLayers) {
+                present = 0u;
+            } else if (opaque != 0u) {
+                uint opaqueBit = uint(findMSB(opaque));
+                if (opaqueBit != 0u) {
+                    present &= ~((1u << opaqueBit) - 1u);
+                }
+                discardLowerLayers = true;
+            }
+            tileData[tileBase + summaryWordCount + uint(word)] = present;
+            if (present != 0u) {
+                nonemptyWords |= 1u << (uint(word) & 31u);
+            }
+        }
+        tileData[tileBase + uint(summaryWord)] = nonemptyWords;
+    }
+}

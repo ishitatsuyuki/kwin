@@ -159,6 +159,7 @@ bool validateShaderInterface(const QShader &shader, const QString &path)
     const bool compositeShader = path.contains(QStringLiteral("tile_composite"));
     const bool prefixPropagateShader = path.contains(QStringLiteral("tile_prefix_propagate"));
     const bool prefixFinalizeShader = path.contains(QStringLiteral("tile_prefix_finalize"));
+    const bool bruteForceMaskShader = path.contains(QStringLiteral("tile_mask_bruteforce"));
     const std::array expectedBindings = simpleCompositeShader
         ? std::array{false, true, true, true, true, false, true, false, false}
         : colorCompositeShader
@@ -169,6 +170,8 @@ bool validateShaderInterface(const QShader &shader, const QString &path)
         ? std::array{false, false, false, false, false, false, false, true, true}
         : prefixFinalizeShader
         ? std::array{false, true, false, false, false, false, false, true, true}
+        : bruteForceMaskShader
+        ? std::array{false, true, false, false, true, false, true, false, false}
         : std::array{false, false, false, false, false, false, true, true, false};
     if (bindings != expectedBindings) {
         qCWarning(KWIN_VULKAN) << "Vulkan compositor shader descriptor interface is incomplete" << path;
@@ -308,6 +311,7 @@ VulkanCompositor::VulkanCompositor(VulkanDevice *device)
     , m_descriptorSetLayout(nullptr)
     , m_pipelineLayout(nullptr)
     , m_preprocessPipeline(nullptr)
+    , m_bruteForceMaskPipeline(nullptr)
     , m_prefixPropagatePipeline(nullptr)
     , m_prefixFinalizePipeline(nullptr)
     , m_compositePipeline(nullptr)
@@ -421,13 +425,14 @@ bool VulkanCompositor::initialize()
 bool VulkanCompositor::createPipelines()
 {
     const auto preprocessModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_preprocess.comp.qsb"));
+    const auto bruteForceMaskModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_mask_bruteforce.comp.qsb"));
     const auto prefixPropagateModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_prefix_propagate.comp.qsb"));
     const auto prefixFinalizeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_prefix_finalize.comp.qsb"));
     const auto compositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite.comp.qsb"));
     const auto colorCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_color.comp.qsb"));
     const auto simpleCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_simple.comp.qsb"));
     const auto shallowCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_simple_2x2.comp.qsb"));
-    if (!preprocessModule || !prefixPropagateModule || !prefixFinalizeModule
+    if (!preprocessModule || !bruteForceMaskModule || !prefixPropagateModule || !prefixFinalizeModule
         || !compositeModule || !colorCompositeModule || !simpleCompositeModule || !shallowCompositeModule) {
         return false;
     }
@@ -452,17 +457,19 @@ bool VulkanCompositor::createPipelines()
     };
 
     auto preprocessPipeline = createPipeline(*preprocessModule);
+    auto bruteForceMaskPipeline = createPipeline(*bruteForceMaskModule);
     auto prefixPropagatePipeline = createPipeline(*prefixPropagateModule);
     auto prefixFinalizePipeline = createPipeline(*prefixFinalizeModule);
     auto compositePipeline = createPipeline(*compositeModule);
     auto colorCompositePipeline = createPipeline(*colorCompositeModule);
     auto simpleCompositePipeline = createPipeline(*simpleCompositeModule);
     auto shallowCompositePipeline = createPipeline(*shallowCompositeModule);
-    if (!preprocessPipeline || !prefixPropagatePipeline || !prefixFinalizePipeline
+    if (!preprocessPipeline || !bruteForceMaskPipeline || !prefixPropagatePipeline || !prefixFinalizePipeline
         || !compositePipeline || !colorCompositePipeline || !simpleCompositePipeline || !shallowCompositePipeline) {
         return false;
     }
     m_preprocessPipeline = std::move(*preprocessPipeline);
+    m_bruteForceMaskPipeline = std::move(*bruteForceMaskPipeline);
     m_prefixPropagatePipeline = std::move(*prefixPropagatePipeline);
     m_prefixFinalizePipeline = std::move(*prefixFinalizePipeline);
     m_compositePipeline = std::move(*compositePipeline);
@@ -1506,10 +1513,14 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                                                         commandBuffer,
                                                         m_device->computeQueueFamily(),
                                                         vk::PipelineStageFlagBits2::eAllCommands);
-    commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_preprocessPipeline);
     commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, m_pipelineLayout, 0, *m_currentFrame->descriptorSets.front(), {});
     commandBuffer.pushConstants(m_pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushConstants), &pushConstants);
-    if (!dirtyTiles.empty() && maskWordCount != 0) {
+    constexpr uint32_t PrefixScanLayerThreshold = 32;
+    if (!dirtyTiles.empty() && maskWordCount != 0 && layers.size() <= PrefixScanLayerThreshold) {
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_bruteForceMaskPipeline);
+        commandBuffer.dispatch((dirtyTiles.size() + 63) / 64, 1, 1);
+    } else if (!dirtyTiles.empty() && maskWordCount != 0) {
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_preprocessPipeline);
         commandBuffer.dispatch(binsWide, binsHigh, maskWordCount);
         const vk::BufferMemoryBarrier2 prefixBarrier{
             vk::PipelineStageFlagBits2::eComputeShader,
@@ -1696,6 +1707,7 @@ void VulkanCompositor::releaseResources()
     m_texture.reset();
     m_sampler.clear();
     m_preprocessPipeline.clear();
+    m_bruteForceMaskPipeline.clear();
     m_prefixPropagatePipeline.clear();
     m_prefixFinalizePipeline.clear();
     m_compositePipeline.clear();

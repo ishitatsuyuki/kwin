@@ -268,6 +268,7 @@ qt_add_shaders(kwin "vulkan_compute_shaders"
     OPTIMIZED
     FILES
         vulkan/shaders/tile_preprocess.comp
+        vulkan/shaders/tile_mask_bruteforce.comp
         vulkan/shaders/tile_prefix_propagate.comp
         vulkan/shaders/tile_prefix_finalize.comp
         vulkan/shaders/tile_composite.comp

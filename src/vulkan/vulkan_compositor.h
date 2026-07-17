@@ -253,6 +253,7 @@ private:
     vk::raii::DescriptorSetLayout m_descriptorSetLayout;
     vk::raii::PipelineLayout m_pipelineLayout;
     vk::raii::Pipeline m_preprocessPipeline;
+    vk::raii::Pipeline m_bruteForceMaskPipeline;
     vk::raii::Pipeline m_prefixPropagatePipeline;
     vk::raii::Pipeline m_prefixFinalizePipeline;
     vk::raii::Pipeline m_compositePipeline;
