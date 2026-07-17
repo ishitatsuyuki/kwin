@@ -205,6 +205,10 @@ Experiments are preserved on `experiment/vulkan-*` branches. Results so far:
   layer, but regressed 16 layers by 5.4% and 64 layers by 8.9% versus RADV's
   filtered sample path. The experiment and benchmark are preserved on
   `experiment/vulkan-integer-texel-fetch`.
+- Rejected: a specialization-constant sRGB-to-Display-P3 matrix. It removed
+  two buffer loads and improved conversion by about 1%, but left register use
+  unchanged at `v23`/`s79`; the exact-matrix pipeline was not worth retaining.
+  The experiment is preserved on `experiment/vulkan-constant-color-matrix`.
 - Accepted selectively: an 8x8 workgroup whose invocations each composite a
   2x2 pixel quad. The extra independent texture requests raise register use to
   `v47`/`s62`, so it is selected only for one- and two-layer simple scenes;
@@ -238,6 +242,30 @@ The focused conversion shader reaches `v23`/`s79`, compared with
 mostly transfer-function work; approximations or encode-once linear
 composition require a separate accuracy and semantic evaluation.
 
+### Tile-level opaque occlusion (2026-07-17)
+
+Source-over composition now runs bottom-to-top. GPU preprocessing resets a
+tile's layer list whenever a later, guaranteed-opaque axis-aligned layer fully
+covers that tile. Surface opaque regions supply the guarantee only at full
+opacity and without rounded clipping; transformed/window edge tiles retain all
+lower layers conservatively. The output boundary is clamped to its real size,
+so a partial final output tile can still be culled.
+
+Bottom-to-top evaluation shortens live state even without occlusion: the
+compact shader drops from `v21` to `v16` and the shallow 2x2 shader from `v47`
+to `v27`. Preprocessing rises from `s8` to `s15` but remains a small part of
+total time.
+
+| 1920x1080 scene | Front-to-back total GPU | Tile-cull/back-to-front total GPU | Change |
+| --- | ---: | ---: | ---: |
+| 1 translucent layer | 0.063 ms | 0.055 ms | -12.9% |
+| 16 translucent layers | 0.427 ms | 0.399 ms | -6.4% |
+| 64 translucent layers | 1.624 ms | 1.537 ms | -5.3% |
+| 64 known-opaque layers | 0.154 ms | 0.143 ms | -7.1% |
+| Tile-aligned large opaque window over 64 layers | 0.814 ms | 0.770 ms | -5.4% |
+| Unaligned large opaque window over 64 layers | 0.824 ms | 0.797 ms | -3.2% |
+| Unaligned small opaque window over 64 layers | 1.448 ms | 1.378 ms | -4.9% |
+
 ## Planned optimization passes
 
 Hierarchical binning and prefix-summed tile compaction are intentionally
@@ -245,13 +273,14 @@ deferred until profiling demonstrates that their complexity is justified.
 
 - [x] Dirty-tile preprocessing and composition
 - [x] Packed dirty-tile coordinates without shader integer division/modulo
-- [x] Front-to-back source-over composition with opaque-layer early termination
+- [x] Back-to-front source-over composition with tile-level opaque occlusion
 - [x] Precomposed output-pixel-to-UV transforms
 - [x] Axis-aligned RGBA/solid source-over pipeline with compact hot records
 - [x] Prefer host-visible device-local layer records with a compatible host-visible fallback
 - [x] Workgroup and subgroup-size sweep on Navi 10 (16x16 wave64 retained)
 - [x] Two-layer blocked source-over evaluation measured and rejected on Navi 10
 - [x] Multi-pixel invocation variant measured and selected for simple scenes with at most two layers
+- [x] Feed known surface opaque regions into conservative per-tile preprocessing culling
 - [x] Fixed-stride layer-index lists beyond 64 layers
 - [ ] Compact prefix-summed tile-list allocation (deferred)
 - [ ] Hierarchical AABB binning (deferred)
