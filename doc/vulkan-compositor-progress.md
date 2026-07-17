@@ -11,8 +11,8 @@ test unless the item explicitly says otherwise.
 - [x] Prefer a high-priority, compute-only queue and fall back safely
 - [x] Separate graphics and compute command pools/submission paths
 - [x] 16x16 tile grid
-- [x] GPU AABB-to-tile preprocessing
-- [x] Per-tile layer-index lists with no fixed scene-layer limit
+- [x] Adaptive GPU AABB-to-tile preprocessing (direct masks for shallow scenes; hierarchical 2D prefix masks for larger scenes)
+- [x] Summarized per-tile layer bitsets with no fixed scene-layer limit
 - [x] GPU timestamp queries for preprocessing and composition
 - [x] Packaged shader descriptor-interface validation before pipeline creation
 - [x] Validation-layer test execution
@@ -266,10 +266,72 @@ total time.
 | Unaligned large opaque window over 64 layers | 0.824 ms | 0.797 ms | -3.2% |
 | Unaligned small opaque window over 64 layers | 1.448 ms | 1.378 ms | -4.9% |
 
+### Hierarchical 2D prefix masks (2026-07-17)
+
+The layer-mask monoid is a fixed-width bitset under XOR. Each axis-aligned
+layer AABB contributes its bit at the four corners of a 2D difference grid;
+an inclusive 2D XOR prefix reconstructs exact tile membership. A second bitset
+uses the same operation for guaranteed-opaque full-tile coverage, allowing the
+final pass to retain the existing conservative lower-layer cutoff.
+
+A single scalar total per 16x16-tile bin is not enough for a 2D prefix because
+partially consumed rows and columns cross bin boundaries. The implementation
+therefore uses row and column boundary vectors:
+
+1. One 16x16 workgroup per bin and 32-layer word generates corner events in
+   shared memory and performs parallel horizontal and vertical inclusive scans.
+2. Independent jobs propagate the right-edge state across every tile row and
+   the bottom-edge state across every tile column. The column job also folds in
+   complete northwest-bin totals.
+3. One invocation per tile XORs its local prefix, left carry, and top carry,
+   applies the highest opaque-layer cutoff, and emits layer masks plus a compact
+   nonempty-word summary for composition.
+
+The direct and prefix paths share that summarized-mask format. Scenes with at
+most 32 layers retain a one-dispatch direct AABB pass; larger scenes use the
+three-pass prefix path. This avoids the fixed prefix latency on normal shallow
+desktops while bounding preprocessing growth for deep scenes. The experiment
+is preserved on `experiment/vulkan-prefix-mask`; its direct-comparison parent
+is `experiment/vulkan-prefix-mask-baseline`.
+
+The preprocessing-focused benchmark keeps all layers outside a 1920x1080
+target so raster work stays constant. Values below are final GPU timestamp
+samples from the same Debug build and validation-enabled run on Navi 10.
+
+| Offscreen layers | Direct-list preprocess / total | Adaptive-mask preprocess / total | Total change |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.0048 / 0.0490 ms | 0.0064 / 0.0510 ms | +3.9% |
+| 16 | 0.0140 / 0.0771 ms | 0.0130 / 0.0790 ms | +2.5% |
+| 64 | 0.0367 / 0.0992 ms | 0.0201 / 0.0858 ms | -13.5% |
+| 256 | 0.1226 / 0.1870 ms | 0.0370 / 0.1030 ms | -44.9% |
+| 1024 | 0.4662 / 0.5303 ms | 0.1692 / 0.2348 ms | -55.7% |
+
+Full-screen overdraw confirms that the scan overhead is amortized around the
+same point. The shallow direct-mask path keeps the 1-4-layer penalty below
+three percent, while 64-layer and opaque/mixed scenes benefit:
+
+| 1920x1080 scene | Direct-list total GPU | Adaptive-mask total GPU | Change |
+| --- | ---: | ---: | ---: |
+| 1 translucent layer | 0.0560 ms | 0.0576 ms | +2.9% |
+| 4 translucent layers | 0.1336 ms | 0.1370 ms | +2.6% |
+| 8 translucent layers | 0.2166 ms | 0.2126 ms | -1.8% |
+| 16 translucent layers | 0.3994 ms | 0.3929 ms | -1.6% |
+| 64 translucent layers | 1.5349 ms | 1.4694 ms | -4.3% |
+| 64 known-opaque layers | 0.1432 ms | 0.1041 ms | -27.3% |
+| Tile-aligned opaque window over 64 layers | 0.7640 ms | 0.7154 ms | -6.4% |
+| Unaligned large opaque window over 64 layers | 0.7970 ms | 0.7460 ms | -6.4% |
+| Unaligned small opaque window over 64 layers | 1.3728 ms | 1.3235 ms | -3.6% |
+
+Unconditionally using the prefix path was rejected: its three dispatches made
+1, 2, and 4-layer scenes 27%, 22%, and 12% slower. The adaptive cutoff retains
+the scalable path only where it wins. `RADV_DEBUG=nocache,shaders` dumps were
+also checked; no new scratch spills appeared in the three preprocessing
+kernels.
+
 ## Planned optimization passes
 
-Hierarchical binning and prefix-summed tile compaction are intentionally
-deferred until profiling demonstrates that their complexity is justified.
+Compact variable-length tile lists remain deferred; summarized fixed-width
+bitsets avoid allocation scans and are faster for the measured deep scenes.
 
 - [x] Dirty-tile preprocessing and composition
 - [x] Packed dirty-tile coordinates without shader integer division/modulo
@@ -281,10 +343,10 @@ deferred until profiling demonstrates that their complexity is justified.
 - [x] Two-layer blocked source-over evaluation measured and rejected on Navi 10
 - [x] Multi-pixel invocation variant measured and selected for simple scenes with at most two layers
 - [x] Feed known surface opaque regions into conservative per-tile preprocessing culling
-- [x] Fixed-stride layer-index lists beyond 64 layers
+- [x] Summarized fixed-stride layer bitsets beyond 64 layers
 - [ ] Compact prefix-summed tile-list allocation (deferred)
-- [ ] Hierarchical AABB binning (deferred)
-- [ ] Prefix-sum tile-list construction (deferred)
+- [x] Hierarchical AABB binning with 16x16-bin 2D XOR prefix scans
+- [x] Adaptive direct/prefix mask construction at the measured 32-layer cutoff
 - [x] Texture descriptor batching without a fixed per-scene texture limit
 - [ ] Texture descriptor indexing/bindless sampling
 - [x] Simple source-over pipeline variant with color management

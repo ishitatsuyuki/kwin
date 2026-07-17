@@ -145,8 +145,9 @@ struct KWIN_EXPORT VulkanCompositorRenderResult
 };
 
 /**
- * Tiled compute compositor. Three preprocessing passes use a hierarchical 2D
- * prefix scan over rectangle-corner XOR events to emit per-tile layer masks.
+ * Tiled compute compositor. Large scenes use a three-pass hierarchical 2D
+ * prefix scan over rectangle-corner XOR events to emit per-tile layer masks;
+ * shallow scenes use a lower-latency direct pass with the same output format.
  * Composition consumes those masks and splits scenes into descriptor batches
  * when more textures are present than fit in one descriptor set.
  */
