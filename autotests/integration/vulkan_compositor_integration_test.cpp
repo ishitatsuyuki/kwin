@@ -18,6 +18,7 @@
 #include "scene/imageitem.h"
 #include "scene/workspacescene.h"
 #include "vulkan/vulkan_texture.h"
+#include "wayland-client/linuxdmabuf.h"
 #include "wayland_server.h"
 #include "workspace.h"
 
@@ -47,6 +48,7 @@ private Q_SLOTS:
     void testStartupFeedbackOverlay();
     void testCrossFadeSnapshot();
     void testLegacyGlShaderBridge();
+    void testLinuxDmabufFeedback();
 };
 
 class LegacyGlShaderEffect : public CrossFadeEffect
@@ -142,6 +144,16 @@ void VulkanCompositorIntegrationTest::initTestCase()
     Test::setOutputConfig({Rect(0, 0, 1280, 1024)});
     QVERIFY(Compositor::self());
     QCOMPARE(Compositor::self()->backend()->compositingType(), VulkanCompositing);
+}
+
+void VulkanCompositorIntegrationTest::testLinuxDmabufFeedback()
+{
+    QVERIFY(Test::setupWaylandConnection(Test::AdditionalWaylandInterface::LinuxDmabuf));
+    QVERIFY(Test::linuxDmabuf());
+    QVERIFY(Test::waylandSync());
+    QTRY_VERIFY_WITH_TIMEOUT(!Test::linuxDmabuf()->mainDevice().isEmpty(), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!Test::linuxDmabuf()->formats().isEmpty(), 5000);
+    Test::destroyWaylandConnection();
 }
 
 void VulkanCompositorIntegrationTest::testVirtualOutputFrame()

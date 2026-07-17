@@ -195,6 +195,7 @@ bool Compositor::attemptVulkanCompositing()
     if (!backend || !backend->device()) {
         return false;
     }
+    backend->initWayland();
     m_backend = std::move(backend);
     qCDebug(KWIN_CORE) << "Vulkan compute compositing has been successfully initialized";
     return true;

@@ -5,9 +5,12 @@
 */
 #include "vulkan_backend.h"
 
+#include "core/drmdevice.h"
 #include "core/renderdevice.h"
 #include "opengl/eglcontext.h"
 #include "vulkan_device.h"
+#include "wayland/linuxdmabufv1clientbuffer.h"
+#include "wayland_server.h"
 
 namespace KWin
 {
@@ -47,6 +50,24 @@ bool VulkanBackend::testImportBuffer(GraphicsBuffer *buffer)
 FormatModifierMap VulkanBackend::supportedFormats() const
 {
     return device() ? device()->supportedFormats() : FormatModifierMap{};
+}
+
+void VulkanBackend::initWayland()
+{
+    if (!WaylandServer::self()) {
+        return;
+    }
+
+    const QList<LinuxDmaBufV1Feedback::Tranche> tranches{{
+        .device = drmDevice()->deviceId(),
+        .flags = LinuxDmaBufV1Feedback::TrancheFlag::Sampling,
+        .formatTable = supportedFormats(),
+    }};
+    LinuxDmaBufV1ClientBufferIntegration *dmabuf = waylandServer()->linuxDmabuf();
+    dmabuf->setRenderBackend(this);
+    dmabuf->setSupportedFormatsWithModifiers(tranches);
+
+    waylandServer()->setRenderBackend(this);
 }
 
 RenderDevice *VulkanBackend::renderDevice() const

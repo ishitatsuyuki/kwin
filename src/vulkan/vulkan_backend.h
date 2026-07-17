@@ -30,6 +30,8 @@ public:
     bool testImportBuffer(GraphicsBuffer *buffer) override final;
     FormatModifierMap supportedFormats() const override final;
 
+    void initWayland();
+
     RenderDevice *renderDevice() const;
     VulkanDevice *device() const;
     /** Compatibility context for legacy effect shaders; not used for scene composition. */
