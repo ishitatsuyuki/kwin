@@ -27,7 +27,7 @@ test unless the item explicitly says otherwise.
 - [x] Image items and per-sprite atlases
 - [x] Multi-plane YUV sampling and range/matrix conversion (NV12/P010 dma-buf plane import is compile-tested; planar shader path is GPU-tested)
 - [x] Rounded corners and outlined borders
-- [x] Decorations and sprite atlases
+- [x] Decorations and sprite atlases, including sparse zero-sized parts used with separately rendered border outlines
 - [x] Shadow nine-patch upload and quad rendering
 - [x] Per-layer transfer functions, colorimetry conversion, linear effects, and perceptual HDR tone mapping
 - [x] ICC/LUT output calibration (BToA, shaper-matrix, MHC2, and VCGT operation chains)
@@ -192,5 +192,5 @@ bridge asynchronous; implementations without them fall back to blocking sync-fd
 waits and `glFinish()` for correctness. Native in-tree effects continue to use
 compute filters and do not pay the cross-API cost. The validation integration test uses an orientation-sensitive
 two-color window and installs a custom channel-swapping shader after snapshot
-capture. The current full runs pass 41 compositor tests and 14 live integration
+capture. The current full runs pass 42 compositor tests and 14 live integration
 tests with no validation messages or current-boot kernel GPU-reset report.

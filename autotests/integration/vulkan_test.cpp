@@ -16,6 +16,7 @@
 #include "opengl/eglcontext.h"
 #include "opengl/glframebuffer.h"
 #include "opengl/gltexture.h"
+#include "scene/atlas.h"
 #include "scene/borderoutline.h"
 #include "scene/imageitem.h"
 #include "scene/itemrenderer_opengl.h"
@@ -70,6 +71,7 @@ private Q_SLOTS:
     void testComputePlanarYuv();
     void testComputeRoundedGeometry();
     void testComputeDestinationOut();
+    void testDecorationAtlasNullSprites();
     void testNinePatchUpload();
     void testHighPrecisionIntermediate();
     void testNativeRenderTarget();
@@ -1197,6 +1199,22 @@ void VulkanTest::testComputeDestinationOut()
     const QImage image = result->texture->download();
     QCOMPARE(image.pixelColor(1, 1), QColor(40, 110, 220, 255));
     QCOMPARE(image.pixelColor(8, 6), QColor(0, 0, 0, 0));
+}
+
+void VulkanTest::testDecorationAtlasNullSprites()
+{
+    const QColor titleBarColor(38, 119, 207, 224);
+    QImage titleBar(QSize(37, 11), QImage::Format_ARGB32_Premultiplied);
+    titleBar.fill(titleBarColor);
+
+    auto renderer = std::make_unique<ItemRendererVulkan>(m_device);
+    QVERIFY(renderer->isValid());
+    auto atlas = renderer->createAtlas({QImage{}, titleBar, QImage{}, QImage{}});
+    QVERIFY(atlas);
+    QVERIFY(atlas->sprite(0).geometry.isEmpty());
+    QCOMPARE(atlas->sprite(1).geometry, titleBar.rect());
+    QVERIFY(atlas->sprite(2).geometry.isEmpty());
+    QVERIFY(atlas->sprite(3).geometry.isEmpty());
 }
 
 void VulkanTest::testNinePatchUpload()

@@ -35,10 +35,17 @@ Atlas::Sprite AtlasVulkan::sprite(uint spriteId) const
 
 bool AtlasVulkan::update(uint spriteId, const QImage &image, const Rect &damage)
 {
-    if (spriteId >= m_textures.size()) {
+    if (spriteId >= m_textures.size() || image.isNull()) {
         return false;
     }
-    m_textures[spriteId]->upload(image, damage);
+    if (m_textures[spriteId]) {
+        m_textures[spriteId]->upload(image, damage);
+    } else {
+        m_textures[spriteId] = ImageTextureVulkan::create(m_device, image);
+        if (!m_textures[spriteId]) {
+            return false;
+        }
+    }
     m_sprites[spriteId] = Sprite{image.rect(), false};
     return true;
 }
@@ -50,6 +57,11 @@ bool AtlasVulkan::reset(const QList<QImage> &images)
     textures.reserve(images.size());
     sprites.reserve(images.size());
     for (const QImage &image : images) {
+        if (image.isNull()) {
+            textures.push_back(nullptr);
+            sprites.push_back(Sprite{Rect(), false});
+            continue;
+        }
         auto texture = ImageTextureVulkan::create(m_device, image);
         if (!texture) {
             return false;
