@@ -210,6 +210,14 @@ bool DrmVulkanLayer::preparePresentationTest()
     if (!ensureSwapchain()) {
         return false;
     }
+    // Reuse the last rendered framebuffer for atomic tests. Importing an
+    // arbitrary free swapchain slot here would replace currentBuffer() with
+    // contents that were never rendered for this frame. In particular, an
+    // asynchronous cursor-position commit between the test and the next
+    // render could then put an older cursor image back on the cursor plane.
+    if (m_currentFramebuffer) {
+        return true;
+    }
     m_current = m_swapchain->acquire();
     if (!m_current) {
         return false;

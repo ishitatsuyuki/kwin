@@ -57,6 +57,7 @@ test unless the item explicitly says otherwise.
 - [x] Source buffer release points and output completion fences
 - [x] Tile-aligned Vulkan repaint expansion before scene occlusion/layer collection (partial-damage move regression plus fractional-scale and all-output-transform coverage)
 - [x] DRM presentation tests preserve Vulkan swapchain ages and multi-GPU copy damage history instead of aging untouched test buffers
+- [x] DRM presentation tests retain the last rendered framebuffer so asynchronous cursor moves cannot present an unrendered stale cursor slot
 - [x] Exact tile damage at fractional output scales using direct output-device/target transform mapping throughout scene collection and rasterization, including tile-footprint buffer-age and KMS/copy damage tracking
 - [x] Wayland explicit host synchronization protocol (`linux-drm-syncobj-v1` acquire fences and per-commit release timelines for output and hardware-cursor dma-bufs; live host protocol trace under Vulkan validation)
 - [x] Screenshot and screencast paths (output, region, and window capture; PipeWire memfd and directly rendered dma-buf buffers with syncobj fences)
@@ -349,6 +350,23 @@ operation is named `releaseRendered()` to make that invariant explicit. The
 multi-GPU copy journal is reset after copying a test buffer for the same reason.
 The regression covers untouched presentation-test imports, real rendered age
 advancement, and a second slot held as if scanned out.
+
+## Resolved bug: cursor tests leaked stale framebuffers
+
+Observed on 2026-07-17 as the hardware cursor alternating between its current
+and previous images while the cursor shape changed. The cursor plane itself
+remained enabled.
+
+Each atomic presentation test imported an arbitrary free Vulkan swapchain slot
+and stored it as `DrmVulkanLayer::currentBuffer()`, even though the slot was not
+rendered. Cursor position updates are committed asynchronously between normal
+frames and use `currentBuffer()`, so a movement after the test could present the
+stale test slot. The next rendered cursor commit restored the current image,
+producing the back-and-forth flicker.
+
+Presentation tests now reuse the last rendered framebuffer when one exists. A
+test-only slot is imported only while initially bringing up a layer, before any
+rendered framebuffer is available.
 
 ## Planned optimization passes
 
