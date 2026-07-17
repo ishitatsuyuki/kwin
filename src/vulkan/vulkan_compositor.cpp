@@ -1043,6 +1043,15 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         if (axisAlignedFastPath) {
             flags |= 1u << 8;
         }
+        const bool guaranteedOpaque = axisAlignedFastPath
+            && layer.blendMode == VulkanBlendMode::SourceOver
+            && layer.colorFilter == VulkanColorFilter::None
+            && layer.opacity >= 1.0
+            && modulation.alphaF() >= 1.0
+            && (layer.opaque || !hasTexture);
+        if (guaranteedOpaque) {
+            flags |= 1u << 13;
+        }
         const bool simpleSourceOver = axisAlignedFastPath
             && layer.blendMode == VulkanBlendMode::SourceOver
             && layer.colorFilter == VulkanColorFilter::None
@@ -1363,6 +1372,7 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         .background = premultiplied(background),
         .firstLayer = 0,
         .lastLayer = uint32_t(layers.size()),
+        .padding = {uint32_t(size.width()), uint32_t(size.height())},
         .outputLutParameters = applyOutputLut ? std::array<float, 4>{float(outputColorPipeline->inputRange.min), float(outputColorPipeline->inputRange.max), float(OutputLutEdgeSize), 0.0f} : std::array<float, 4>{},
     };
 

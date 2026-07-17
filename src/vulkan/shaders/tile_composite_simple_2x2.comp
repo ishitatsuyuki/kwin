@@ -101,46 +101,36 @@ void main()
     uint tileLayerCount = tileData[listBase];
     vec4 background[4];
     vec4 result[4];
-    float remaining[4];
     for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
         background[pixelIndex] = valid[pixelIndex]
             ? ((params.flags & (1u << 1)) != 0u
                    ? imageLoad(destination, pixels[pixelIndex])
                    : params.background)
             : vec4(0.0);
-        result[pixelIndex] = vec4(0.0);
-        remaining[pixelIndex] = valid[pixelIndex] ? 1.0 : 0.0;
+        result[pixelIndex] = background[pixelIndex];
     }
-    for (int i = int(tileLayerCount) - 1; i >= 0; --i) {
-        bool anyUncovered = false;
-        for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
-            anyUncovered = anyUncovered || remaining[pixelIndex] > 0.0;
-        }
-        if (!anyUncovered) {
-            break;
-        }
-        uint layerIndex = tileData[listBase + 1u + uint(i)];
+    for (uint i = 0u; i < tileLayerCount; ++i) {
+        uint layerIndex = tileData[listBase + 1u + i];
         if (layerIndex < params.firstLayer || layerIndex >= params.lastLayer) {
             continue;
         }
         HotLayer layer = layers[layerIndex];
         for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
-            if (remaining[pixelIndex] <= 0.0) {
+            if (!valid[pixelIndex]) {
                 continue;
             }
             vec4 source;
             if (!evaluateLayer(layer, vec2(pixels[pixelIndex]) + vec2(0.5), source)) {
                 continue;
             }
-            result[pixelIndex] += source * remaining[pixelIndex];
-            remaining[pixelIndex] *= 1.0 - source.a;
+            result[pixelIndex] = source + result[pixelIndex] * (1.0 - source.a);
         }
     }
     for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
         if (valid[pixelIndex]) {
             imageStore(destination,
                        pixels[pixelIndex],
-                       result[pixelIndex] + background[pixelIndex] * remaining[pixelIndex]);
+                       result[pixelIndex]);
         }
     }
 }

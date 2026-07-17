@@ -91,10 +91,9 @@ void main()
     vec4 background = (params.flags & (1u << 1)) != 0u
         ? imageLoad(destination, pixel)
         : params.background;
-    vec4 result = vec4(0.0);
-    float remaining = 1.0;
-    for (int i = int(tileLayerCount) - 1; i >= 0 && remaining > 0.0; --i) {
-        uint layerIndex = tileData[listBase + 1u + uint(i)];
+    vec4 result = background;
+    for (uint i = 0u; i < tileLayerCount; ++i) {
+        uint layerIndex = tileData[listBase + 1u + i];
         if (layerIndex < params.firstLayer || layerIndex >= params.lastLayer) {
             continue;
         }
@@ -102,8 +101,7 @@ void main()
         if (!evaluateLayer(layers[layerIndex], samplePosition, source)) {
             continue;
         }
-        result += source * remaining;
-        remaining *= 1.0 - source.a;
+        result = source + result * (1.0 - source.a);
     }
-    imageStore(destination, pixel, result + background * remaining);
+    imageStore(destination, pixel, result);
 }

@@ -770,7 +770,8 @@ void ItemRendererVulkan::appendTextureLayer(const QRectF &rect,
                                             const std::shared_ptr<ColorDescription> &colorDescription,
                                             RenderingIntent renderingIntent,
                                             const QTransform &textureTransform,
-                                            const std::optional<RoundedClip> &roundedClip)
+                                            const std::optional<RoundedClip> &roundedClip,
+                                            bool opaque)
 {
     if (!texture || !texture->nativeTexture()) {
         return;
@@ -802,6 +803,7 @@ void ItemRendererVulkan::appendTextureLayer(const QRectF &rect,
         .cornerRadii = roundedClip ? roundedClip->radii : QVector4D{},
         .colorDescription = colorDescription,
         .renderingIntent = renderingIntent,
+        .opaque = opaque,
     });
     appendFractionalDebugLayer(m_layers.back());
 }
@@ -825,6 +827,7 @@ void ItemRendererVulkan::appendFractionalDebugLayer(const VulkanCompositorLayer 
     debugLayer.colorFilterMatrix = {};
     debugLayer.colorFilterParameters = {};
     debugLayer.colorDescription = nullptr;
+    debugLayer.opaque = false;
     m_layers.push_back(std::move(debugLayer));
 }
 
@@ -843,12 +846,14 @@ void ItemRendererVulkan::collectSurface(SurfaceItem *item,
     const RectF sourceBox = item->bufferSourceBox();
     const QSizeF destinationSize = item->destinationSize();
     const QTransform textureTransform = outputTransform(item->bufferTransform());
+    const RegionF opaqueRegion = item->opaque();
     for (const RectF &rect : item->shape().rects()) {
         const QRectF source(sourceBox.x() + rect.x() * sourceBox.width() / destinationSize.width(),
                             sourceBox.y() + rect.y() * sourceBox.height() / destinationSize.height(),
                             rect.width() * sourceBox.width() / destinationSize.width(),
                             rect.height() * sourceBox.height() / destinationSize.height());
-        appendTextureLayer(rect, texture, source, transform, opacity, brightness, saturation, clipRect, item->colorDescription(), item->renderingIntent(), textureTransform, roundedClip);
+        const bool opaque = opacity >= 1.0 && !roundedClip && opaqueRegion.contains(rect);
+        appendTextureLayer(rect, texture, source, transform, opacity, brightness, saturation, clipRect, item->colorDescription(), item->renderingIntent(), textureTransform, roundedClip, opaque);
     }
 }
 

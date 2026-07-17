@@ -124,6 +124,8 @@ struct KWIN_EXPORT VulkanCompositorLayer
     /** Encoded color space of this layer. Null keeps the legacy pass-through path. */
     std::shared_ptr<ColorDescription> colorDescription;
     RenderingIntent renderingIntent = RenderingIntent::Perceptual;
+    /** The texture is guaranteed opaque throughout rect before opacity modulation. */
+    bool opaque = false;
 };
 
 struct KWIN_EXPORT VulkanCompositorRenderResult

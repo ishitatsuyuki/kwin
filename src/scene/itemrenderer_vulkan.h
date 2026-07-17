@@ -169,7 +169,8 @@ private:
                             const std::shared_ptr<ColorDescription> &colorDescription,
                             RenderingIntent renderingIntent,
                             const QTransform &textureTransform = {},
-                            const std::optional<RoundedClip> &roundedClip = std::nullopt);
+                            const std::optional<RoundedClip> &roundedClip = std::nullopt,
+                            bool opaque = false);
     void appendFractionalDebugLayer(const VulkanCompositorLayer &layer);
     BlurFrameResources *acquireBlurFrame(uint32_t maximumIterationCount);
     bool ensureBlurFrameResources(BlurFrameResources &frame, uint32_t maximumIterationCount);

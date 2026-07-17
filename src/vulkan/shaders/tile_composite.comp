@@ -822,12 +822,9 @@ void main()
         : params.background;
     vec4 result;
     if ((params.flags & 1u) == 0u) {
-        // Source-over is associative. Walking front-to-back lets opaque
-        // content terminate immediately without touching occluded layers.
-        result = vec4(0.0);
-        float remaining = 1.0;
-        for (int i = int(tileLayerCount) - 1; i >= 0 && remaining > 0.0; --i) {
-            uint layerIndex = tileData[listBase + 1u + uint(i)];
+        result = background;
+        for (uint i = 0u; i < tileLayerCount; ++i) {
+            uint layerIndex = tileData[listBase + 1u + i];
             if (layerIndex < params.firstLayer || layerIndex >= params.lastLayer) {
                 continue;
             }
@@ -836,10 +833,8 @@ void main()
             if (!evaluateLayer(layers[layerIndex], samplePosition, source, coverage)) {
                 continue;
             }
-            result += source * remaining;
-            remaining *= 1.0 - source.a;
+            result = source + result * (1.0 - source.a);
         }
-        result += background * remaining;
     } else {
         // Destination-out depends on the accumulated destination below it,
         // so preserve strict bottom-to-top Porter-Duff order for those scenes.
