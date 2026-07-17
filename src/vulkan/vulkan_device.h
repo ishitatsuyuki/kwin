@@ -54,6 +54,12 @@ public:
 
     vk::raii::DeviceMemory allocateMemory(const vk::ImageCreateInfo &imageInfo, vk::MemoryPropertyFlags memoryProperties);
     vk::raii::DeviceMemory allocateMemory(const vk::BufferCreateInfo &bufferInfo, vk::MemoryPropertyFlags memoryProperties);
+    // Preferred properties are used when a compatible type exposes all of
+    // them; otherwise allocation falls back to the first type satisfying the
+    // required properties.
+    vk::raii::DeviceMemory allocateMemory(const vk::BufferCreateInfo &bufferInfo,
+                                          vk::MemoryPropertyFlags requiredMemoryProperties,
+                                          vk::MemoryPropertyFlags preferredMemoryProperties);
 
     const FormatModifierMap &supportedFormats() const;
     const FormatModifierMap &computeOutputFormats() const;
@@ -129,7 +135,9 @@ private:
     std::optional<FileDescriptor> submit(vk::raii::CommandBuffer &&buffer, FileDescriptor &&syncFd,
                                          const vk::raii::Queue &queue, std::deque<SubmittedCommand> &submissions);
     FormatModifierMap queryFormats(VkImageUsageFlags flags) const;
-    std::optional<uint32_t> findMemoryType(uint32_t typeBits, vk::MemoryPropertyFlags memoryPropertyFlags) const;
+    std::optional<uint32_t> findMemoryType(uint32_t typeBits,
+                                           vk::MemoryPropertyFlags requiredMemoryProperties,
+                                           vk::MemoryPropertyFlags preferredMemoryProperties = {}) const;
     std::shared_ptr<VulkanTexture> importDmabuf(const DmaBufAttributes *attributes, VkImageUsageFlags usage,
                                                 int plane = -1, uint32_t planeFormat = 0, const QSize &planeSize = QSize{});
 

@@ -392,14 +392,23 @@ FormatModifierMap VulkanDevice::queryFormats(VkImageUsageFlags flags) const
     return ret;
 }
 
-std::optional<uint32_t> VulkanDevice::findMemoryType(uint32_t typeBits, vk::MemoryPropertyFlags memoryPropertyFlags) const
+std::optional<uint32_t> VulkanDevice::findMemoryType(uint32_t typeBits,
+                                                     vk::MemoryPropertyFlags requiredMemoryProperties,
+                                                     vk::MemoryPropertyFlags preferredMemoryProperties) const
 {
+    std::optional<uint32_t> fallback;
     for (uint32_t i = 0; i < m_memoryProperties.memoryTypeCount; i++) {
-        if ((typeBits & (1 << i)) && ((m_memoryProperties.memoryTypes[i].propertyFlags & memoryPropertyFlags) == memoryPropertyFlags)) {
-            return i;
+        const vk::MemoryPropertyFlags flags = m_memoryProperties.memoryTypes[i].propertyFlags;
+        if ((typeBits & (1 << i)) && ((flags & requiredMemoryProperties) == requiredMemoryProperties)) {
+            if ((flags & preferredMemoryProperties) == preferredMemoryProperties) {
+                return i;
+            }
+            if (!fallback) {
+                fallback = i;
+            }
         }
     }
-    return std::nullopt;
+    return fallback;
 }
 
 bool VulkanDevice::isSoftwareRenderer() const
@@ -625,10 +634,19 @@ vk::raii::DeviceMemory VulkanDevice::allocateMemory(const vk::ImageCreateInfo &i
 
 vk::raii::DeviceMemory VulkanDevice::allocateMemory(const vk::BufferCreateInfo &bufferInfo, vk::MemoryPropertyFlags memoryProperties)
 {
+    return allocateMemory(bufferInfo, memoryProperties, {});
+}
+
+vk::raii::DeviceMemory VulkanDevice::allocateMemory(const vk::BufferCreateInfo &bufferInfo,
+                                                    vk::MemoryPropertyFlags requiredMemoryProperties,
+                                                    vk::MemoryPropertyFlags preferredMemoryProperties)
+{
     const auto requirements = m_logical.getBufferMemoryRequirements(vk::DeviceBufferMemoryRequirements{
         &bufferInfo,
     });
-    if (const auto typeIndex = findMemoryType(requirements.memoryRequirements.memoryTypeBits, memoryProperties)) {
+    if (const auto typeIndex = findMemoryType(requirements.memoryRequirements.memoryTypeBits,
+                                              requiredMemoryProperties,
+                                              preferredMemoryProperties)) {
         auto [result, ret] = m_logical.allocateMemory(vk::MemoryAllocateInfo{
             requirements.memoryRequirements.size,
             *typeIndex,

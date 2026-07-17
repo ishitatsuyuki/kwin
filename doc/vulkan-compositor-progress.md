@@ -368,6 +368,27 @@ Presentation tests now reuse the last rendered framebuffer when one exists. A
 test-only slot is imported only while initially bringing up a layer, before any
 rendered framebuffer is available.
 
+## Resolved performance bug: Vulkan readback used uncached host memory
+
+Observed on 2026-07-17 as very slow Vulkan-rendered `WindowThumbnail` updates.
+The software Qt Quick fallback renders the window into a Vulkan texture and
+then uses `VulkanTexture::download()` to copy it into a `QImage`. The readback
+buffer requested only host-visible, coherent memory, so the first-match
+allocator selected uncached system memory on RADV/Navi 10. Reading the copied
+pixels through that mapping made the final CPU `memcpy()` dominate the update.
+
+Readback buffers now require host-visible memory and prefer a host-cached type,
+with an explicit mapped-memory invalidation so non-coherent cached types are
+also valid. Devices without host-cached memory retain the prior compatible
+fallback. A 2048x1152 RGBA blocking-download benchmark was added to preserve
+the workload. In the RelWithDebInfo build on the Navi 10 test machine, without
+validation, the median fell from 52.1 ms to 3.6 ms per download (14.5x faster)
+with:
+
+```sh
+build/bin/vulkanCompositorBenchmark -median 5 -iterations 10 benchmarkDownload
+```
+
 ## Planned optimization passes
 
 Compact variable-length tile lists remain deferred; summarized fixed-width

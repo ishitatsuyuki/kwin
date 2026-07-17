@@ -58,6 +58,7 @@ private Q_SLOTS:
     void benchmarkTileOcclusion();
     void benchmarkBinning_data();
     void benchmarkBinning();
+    void benchmarkDownload();
     void benchmarkOpenGLOverdraw_data();
     void benchmarkOpenGLOverdraw();
     void benchmarkComputeLatencyUnderGraphicsContention_data();
@@ -343,6 +344,23 @@ void VulkanCompositorBenchmark::benchmarkBinning()
     qInfo().nospace() << "Vulkan binning GPU timestamps: preprocess=" << preprocessDuration.count()
                       << "ns composite=" << compositeDuration.count()
                       << "ns total=" << (preprocessDuration + compositeDuration).count() << "ns";
+}
+
+void VulkanCompositorBenchmark::benchmarkDownload()
+{
+    const QSize size(2048, 1152);
+    QImage source(size, QImage::Format_RGBA8888_Premultiplied);
+    source.fill(QColor(40, 80, 120, 200));
+    auto texture = VulkanTexture::upload(m_device,
+                                         source,
+                                         vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc,
+                                         VulkanQueueRole::Compute);
+    QVERIFY(texture);
+
+    QBENCHMARK {
+        const QImage result = texture->download();
+        QVERIFY(!result.isNull());
+    }
 }
 
 void VulkanCompositorBenchmark::benchmarkOpenGLOverdraw_data()

@@ -160,7 +160,12 @@ QImage VulkanTexture::download() const
         bufferSize,
         vk::BufferUsageFlagBits::eTransferDst,
     };
-    auto stagingMemory = m_device->allocateMemory(bufferInfo, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+    // CPU reads from uncached host-visible mappings are extremely slow on
+    // discrete GPUs. Prefer cached memory, and invalidate it explicitly so a
+    // non-coherent cached memory type is usable too.
+    auto stagingMemory = m_device->allocateMemory(bufferInfo,
+                                                  vk::MemoryPropertyFlagBits::eHostVisible,
+                                                  vk::MemoryPropertyFlagBits::eHostCached);
     if (!*stagingMemory) {
         return {};
     }
@@ -235,8 +240,18 @@ QImage VulkanTexture::download() const
 
     // use mapMemory/unmapMemory (Vulkan 1.0) instead of mapMemory2/unmapMemory2 (Vulkan 1.4)
     // for compatibility with lavapipe and other drivers that don't support 1.4
-    auto [mapResult, dataPtr] = stagingMemory.mapMemory(0, bufferSize);
+    auto [mapResult, dataPtr] = stagingMemory.mapMemory(0, VK_WHOLE_SIZE);
     if (mapResult != vk::Result::eSuccess) {
+        return {};
+    }
+
+    const vk::Result invalidateResult = m_device->logicalDevice().invalidateMappedMemoryRanges(vk::MappedMemoryRange{
+        *stagingMemory,
+        0,
+        VK_WHOLE_SIZE,
+    });
+    if (invalidateResult != vk::Result::eSuccess) {
+        stagingMemory.unmapMemory();
         return {};
     }
 
