@@ -21,6 +21,8 @@ SurfaceItemInternal::SurfaceItemInternal(InternalWindow *window, Item *parent)
     setBuffer(m_window->graphicsBuffer());
     setBufferSourceBox(RectF(QPointF(0, 0), window->bufferGeometry().size() * window->bufferScale()));
     setBufferTransform(m_window->bufferTransform());
+    setAcquireFence(m_window->takeAcquireFence());
+    setBufferReleasePoint(m_window->takeReleasePoint());
 }
 
 InternalWindow *SurfaceItemInternal::window() const
@@ -39,6 +41,8 @@ void SurfaceItemInternal::handlePresented(const InternalWindowFrame &frame)
     setBuffer(frame.buffer);
     setBufferSourceBox(RectF(QPointF(0, 0), frame.buffer->size()));
     setBufferTransform(frame.bufferTransform);
+    setAcquireFence(m_window->takeAcquireFence());
+    setBufferReleasePoint(m_window->takeReleasePoint());
 
     addDamage(frame.bufferDamage);
 }

@@ -5,23 +5,38 @@
 */
 
 #include "plugins/qpa/swapchain.h"
+#include "core/syncobjtimeline.h"
 
 namespace KWin
 {
 namespace QPA
 {
 
+class SwapchainSlot
+{
+public:
+    explicit SwapchainSlot(GraphicsBuffer *buffer)
+        : buffer(buffer)
+        , releasePoint(std::make_shared<GraphicsBufferReleasePoint>())
+    {
+    }
+
+    GraphicsBuffer *buffer;
+    std::shared_ptr<GraphicsBufferReleasePoint> releasePoint;
+};
+
 Swapchain::Swapchain(GraphicsBufferAllocator *allocator, const GraphicsBufferOptions &options, GraphicsBuffer *initialBuffer)
     : m_allocator(allocator)
     , m_allocationOptions(options)
 {
-    m_buffers.push_back(initialBuffer);
+    m_slots.push_back(std::make_unique<SwapchainSlot>(initialBuffer));
 }
 
 Swapchain::~Swapchain()
 {
-    for (GraphicsBuffer *buffer : std::as_const(m_buffers)) {
-        buffer->drop();
+    for (const auto &slot : std::as_const(m_slots)) {
+        slot->releasePoint->setBuffer(slot->buffer);
+        slot->buffer->drop();
     }
 }
 
@@ -32,9 +47,12 @@ QSize Swapchain::size() const
 
 GraphicsBuffer *Swapchain::acquire()
 {
-    for (GraphicsBuffer *buffer : std::as_const(m_buffers)) {
-        if (!buffer->isReferenced()) {
-            return buffer;
+    for (const auto &slot : std::as_const(m_slots)) {
+        const FileDescriptor &releaseFence = slot->releasePoint->releaseFd();
+        if (!slot->buffer->isReferenced()
+            && slot->releasePoint.use_count() == 1
+            && (!releaseFence.isValid() || releaseFence.isReadable())) {
+            return slot->buffer;
         }
     }
 
@@ -43,8 +61,16 @@ GraphicsBuffer *Swapchain::acquire()
         return nullptr;
     }
 
-    m_buffers.append(buffer);
+    m_slots.push_back(std::make_unique<SwapchainSlot>(buffer));
     return buffer;
+}
+
+std::shared_ptr<SyncReleasePoint> Swapchain::releasePoint(GraphicsBuffer *buffer) const
+{
+    const auto it = std::ranges::find_if(m_slots, [buffer](const auto &slot) {
+        return slot->buffer == buffer;
+    });
+    return it == m_slots.end() ? nullptr : (*it)->releasePoint;
 }
 
 uint32_t Swapchain::format() const

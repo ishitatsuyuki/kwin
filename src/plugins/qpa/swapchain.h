@@ -9,11 +9,15 @@
 #include "core/graphicsbuffer.h"
 #include "core/graphicsbufferallocator.h"
 
+#include <vector>
+
 namespace KWin
 {
 
 namespace QPA
 {
+
+class SwapchainSlot;
 
 class Swapchain
 {
@@ -24,13 +28,14 @@ public:
     QSize size() const;
 
     GraphicsBuffer *acquire();
+    std::shared_ptr<SyncReleasePoint> releasePoint(GraphicsBuffer *buffer) const;
     uint32_t format() const;
     const ModifierList &modifiers() const;
 
 private:
     GraphicsBufferAllocator *m_allocator;
     GraphicsBufferOptions m_allocationOptions;
-    QList<GraphicsBuffer *> m_buffers;
+    std::vector<std::unique_ptr<SwapchainSlot>> m_slots;
 };
 
 }

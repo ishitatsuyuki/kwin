@@ -30,6 +30,7 @@ namespace KWin
 {
 
 class GLTexture;
+class SyncReleasePoint;
 
 class OffscreenQuickView;
 struct PointerAxisEvent;
@@ -114,6 +115,26 @@ public:
     void setAutomaticRepaint(bool set);
 
     void setDevicePixelRatio(qreal dpr);
+
+    /**
+     * Registers a graphics resource sampled by this view. The release point is
+     * fenced after each rendered Qt Quick frame, so another graphics API can
+     * safely reuse the resource once the fence signals.
+     *
+     * The owner must unregister the release point before it is destroyed or
+     * stops referring to that resource.
+     *
+     * @internal
+     */
+    void registerTextureReleasePoint(const void *owner, const std::weak_ptr<SyncReleasePoint> &releasePoint);
+    void unregisterTextureReleasePoint(const void *owner);
+
+    /**
+     * Returns the offscreen view associated with the given Qt Quick window.
+     *
+     * @internal
+     */
+    static OffscreenQuickView *findView(QQuickWindow *window);
 
     /**
      * Inject a key event into the window.

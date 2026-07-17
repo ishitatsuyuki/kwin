@@ -10,6 +10,7 @@
 #include "core/graphicsbuffer.h"
 #include "core/output.h"
 #include "scene/item.h"
+#include "utils/filedescriptor.h"
 
 #include <deque>
 
@@ -39,6 +40,8 @@ public:
     void setBuffer(GraphicsBuffer *buffer);
 
     void setBufferReleasePoint(const std::shared_ptr<SyncReleasePoint> &releasePoint);
+    void setAcquireFence(FileDescriptor &&fence);
+    FileDescriptor takeAcquireFence();
 
     RectF bufferSourceBox() const;
     void setBufferSourceBox(const RectF &box);
@@ -95,6 +98,7 @@ protected:
     std::optional<std::chrono::nanoseconds> m_accumulatedTimeDiffs;
     std::optional<std::chrono::steady_clock::time_point> m_lastDamage;
     std::shared_ptr<SyncReleasePoint> m_bufferReleasePoint;
+    FileDescriptor m_acquireFence;
 };
 
 } // namespace KWin

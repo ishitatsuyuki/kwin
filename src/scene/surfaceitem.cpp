@@ -61,6 +61,16 @@ void SurfaceItem::setBufferReleasePoint(const std::shared_ptr<SyncReleasePoint> 
     m_bufferReleasePoint = releasePoint;
 }
 
+void SurfaceItem::setAcquireFence(FileDescriptor &&fence)
+{
+    m_acquireFence = std::move(fence);
+}
+
+FileDescriptor SurfaceItem::takeAcquireFence()
+{
+    return std::move(m_acquireFence);
+}
+
 RectF SurfaceItem::bufferSourceBox() const
 {
     return m_bufferSourceBox;

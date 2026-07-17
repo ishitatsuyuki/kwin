@@ -17,6 +17,7 @@
 #include "opengl/glshadermanager.h"
 #include "scene/imageitem.h"
 #include "scene/workspacescene.h"
+#include "scripting/windowthumbnailitem.h"
 #include "vulkan/vulkan_texture.h"
 #include "wayland-client/linuxdmabuf.h"
 #include "wayland_server.h"
@@ -25,6 +26,7 @@
 #include <KConfigGroup>
 #include <KWayland/Client/surface.h>
 #include <QPainter>
+#include <QQuickWindow>
 #include <QRasterWindow>
 
 namespace KWin
@@ -37,6 +39,7 @@ class VulkanCompositorIntegrationTest : public QObject
 private Q_SLOTS:
     void initTestCase();
     void testVirtualOutputFrame();
+    void testInternalQuickWindow();
     void testPartialDamageTileExpansion();
     void testWindowThumbnail();
     void testFallApartOffscreenMesh();
@@ -188,6 +191,47 @@ void VulkanCompositorIntegrationTest::testVirtualOutputFrame()
     QCOMPARE(frame.pixelColor(12, 11).alpha(), 255);
 }
 
+void VulkanCompositorIntegrationTest::testInternalQuickWindow()
+{
+    const QList<LogicalOutput *> outputs = workspace()->outputs();
+    const QList<OutputLayer *> layers = Compositor::self()->backend()->compatibleOutputLayers(outputs.front()->backendOutput());
+    auto layer = dynamic_cast<VirtualVulkanLayer *>(layers.front());
+    QVERIFY(layer);
+
+    const QColor quickColor(71, 184, 109);
+    QQuickWindow window;
+    window.setFlags(Qt::FramelessWindowHint);
+    window.setColor(quickColor);
+    window.setGeometry(640, 120, 240, 160);
+    window.show();
+
+    QTRY_VERIFY_WITH_TIMEOUT(window.isExposed(), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(window.rendererInterface()->graphicsApi(), QSGRendererInterface::OpenGL, 5000);
+
+    QImage frame;
+    QTRY_VERIFY_WITH_TIMEOUT(([&]() {
+        if (!layer->texture()) {
+            return false;
+        }
+        frame = layer->texture()->download();
+        if (frame.isNull()) {
+            return false;
+        }
+        for (int y = 0; y < frame.height(); y += 8) {
+            for (int x = 0; x < frame.width(); x += 8) {
+                const QColor actual = frame.pixelColor(x, y);
+                if (std::abs(actual.red() - quickColor.red()) <= 2
+                    && std::abs(actual.green() - quickColor.green()) <= 2
+                    && std::abs(actual.blue() - quickColor.blue()) <= 2) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    })(),
+                             5000);
+}
+
 void VulkanCompositorIntegrationTest::testPartialDamageTileExpansion()
 {
     const QList<LogicalOutput *> outputs = workspace()->outputs();
@@ -245,18 +289,35 @@ void VulkanCompositorIntegrationTest::testWindowThumbnail()
         QVERIFY(surface);
         std::unique_ptr<Test::XdgToplevel> shellSurface(Test::createXdgToplevelSurface(surface.get()));
         QVERIFY(shellSurface);
-        Window *window = Test::renderAndWaitForShown(surface.get(), QSize(96, 64), QColor(27, 83, 219));
+        const QColor topColor(219, 47, 31);
+        const QColor bottomColor(27, 83, 219);
+        QImage sourceImage(QSize(96, 64), QImage::Format_ARGB32_Premultiplied);
+        sourceImage.fill(topColor);
+        QPainter sourcePainter(&sourceImage);
+        sourcePainter.fillRect(QRect(0, 32, 96, 32), bottomColor);
+        sourcePainter.end();
+
+        Window *window = Test::renderAndWaitForShown(surface.get(), sourceImage);
         QVERIFY(window);
 
         window->move(QPoint(40, 40));
 
-        OffscreenQuickScene thumbnailScene(OffscreenQuickView::ExportMode::Image);
+        OffscreenQuickScene thumbnailScene(OffscreenQuickView::ExportMode::Texture);
+        QCOMPARE(thumbnailScene.window()->rendererInterface()->graphicsApi(), QSGRendererInterface::OpenGL);
         thumbnailScene.setSource(QUrl::fromLocalFile(QFINDTESTDATA("data/vulkan_thumbnail.qml")),
                                  {{QStringLiteral("testClient"), QVariant::fromValue(window)}});
         QVERIFY(thumbnailScene.rootItem());
         thumbnailScene.setGeometry(Rect(300, 280, 192, 128));
+
+        // The Vulkan compositor must render into a KWin-owned dma-buf that is
+        // imported directly by Qt Quick.
+        const auto thumbnailSource = WindowThumbnailSource::getOrCreate(thumbnailScene.window(), window);
         Q_EMIT kwinApp()->scene()->preFrameRender();
         thumbnailScene.update(nullptr);
+        const auto nativeFrame = thumbnailSource->acquire();
+        QVERIFY(nativeFrame.texture);
+        QVERIFY(nativeFrame.image.isNull());
+        QVERIFY(!nativeFrame.releasePoint.expired());
         kwinApp()->scene()->addRepaintFull();
 
         const QList<LogicalOutput *> outputs = workspace()->outputs();
@@ -272,10 +333,46 @@ void VulkanCompositorIntegrationTest::testWindowThumbnail()
             if (outputFrame.isNull()) {
                 return false;
             }
-            const QColor center = outputFrame.pixelColor(396, 344);
-            return center.blue() >= 217
-                && std::abs(center.red() - 27) <= 2
-                && std::abs(center.green() - 83) <= 2;
+            const auto closeTo = [](const QColor &actual, const QColor &expected) {
+                return std::abs(actual.red() - expected.red()) <= 2
+                    && std::abs(actual.green() - expected.green()) <= 2
+                    && std::abs(actual.blue() - expected.blue()) <= 2;
+            };
+            return closeTo(outputFrame.pixelColor(396, 300), topColor)
+                && closeTo(outputFrame.pixelColor(396, 388), bottomColor);
+        })(),
+                                 5000);
+
+        // Damage the source after the first Qt Quick frame. This exercises
+        // slot reuse and the GL-consumer-to-Vulkan-producer release fence.
+        const QColor updatedTopColor(41, 201, 97);
+        const QColor updatedBottomColor(229, 190, 37);
+        sourceImage.fill(updatedTopColor);
+        QPainter updatedPainter(&sourceImage);
+        updatedPainter.fillRect(QRect(0, 32, 96, 32), updatedBottomColor);
+        updatedPainter.end();
+        QSignalSpy damagedSpy(window, &Window::damaged);
+        Test::render(surface.get(), sourceImage);
+        QTRY_VERIFY_WITH_TIMEOUT(damagedSpy.count() > 0, 5000);
+
+        Q_EMIT kwinApp()->scene()->preFrameRender();
+        thumbnailScene.update(nullptr);
+        kwinApp()->scene()->addRepaintFull();
+        QTRY_VERIFY_WITH_TIMEOUT(([&]() {
+            if (!layer->texture()) {
+                return false;
+            }
+            outputFrame = layer->texture()->download();
+            if (outputFrame.isNull()) {
+                return false;
+            }
+            const auto closeTo = [](const QColor &actual, const QColor &expected) {
+                return std::abs(actual.red() - expected.red()) <= 2
+                    && std::abs(actual.green() - expected.green()) <= 2
+                    && std::abs(actual.blue() - expected.blue()) <= 2;
+            };
+            return closeTo(outputFrame.pixelColor(396, 300), updatedTopColor)
+                && closeTo(outputFrame.pixelColor(396, 388), updatedBottomColor);
         })(),
                                  5000);
     }

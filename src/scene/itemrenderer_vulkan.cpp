@@ -880,6 +880,12 @@ void ItemRendererVulkan::collectSurface(SurfaceItem *item,
     if (!texture || item->destinationSize().isEmpty()) {
         return;
     }
+    FileDescriptor acquireFence = item->takeAcquireFence();
+    if (acquireFence.isValid()) {
+        m_acquireFence = m_acquireFence.isValid()
+            ? SyncReleasePoint::mergeSyncFds(m_acquireFence, acquireFence)
+            : std::move(acquireFence);
+    }
     const RectF sourceBox = item->bufferSourceBox();
     const QSizeF destinationSize = item->destinationSize();
     const QTransform textureTransform = outputTransform(item->bufferTransform());

@@ -31,6 +31,7 @@ public:
     FormatModifierMap supportedFormats() const override final;
 
     void initWayland();
+    bool initializeQuickRenderer();
 
     RenderDevice *renderDevice() const;
     VulkanDevice *device() const;

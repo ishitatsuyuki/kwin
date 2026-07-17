@@ -32,6 +32,26 @@ namespace KWin
 
 static std::shared_ptr<EglContext> s_globalShareContext;
 
+EglContext *ensureEglGlobalShareContext(EglDisplay *display)
+{
+    if (!s_globalShareContext) {
+        s_globalShareContext = EglContext::create(display, EGL_NO_CONFIG_KHR, nullptr);
+        QObject::connect(Compositor::self(), &Compositor::aboutToDestroy, qApp, []() {
+            EglDisplay *const eglDisplay = kwinApp()->outputBackend()->sceneEglDisplayObject();
+            if (!eglDisplay || !s_globalShareContext) {
+                return;
+            }
+            s_globalShareContext.reset();
+            kwinApp()->outputBackend()->setSceneEglGlobalShareContext(nullptr);
+        });
+    }
+    if (!s_globalShareContext) {
+        return nullptr;
+    }
+    kwinApp()->outputBackend()->setSceneEglGlobalShareContext(s_globalShareContext.get());
+    return s_globalShareContext.get();
+}
+
 EglBackend::EglBackend()
 {
 }
@@ -87,23 +107,7 @@ bool EglBackend::checkGraphicsReset()
 
 bool EglBackend::ensureGlobalShareContext()
 {
-    if (!s_globalShareContext) {
-        s_globalShareContext = EglContext::create(m_renderDevice->eglDisplay(), EGL_NO_CONFIG_KHR, nullptr);
-        connect(Compositor::self(), &Compositor::aboutToDestroy, qApp, []() {
-            EglDisplay *const eglDisplay = kwinApp()->outputBackend()->sceneEglDisplayObject();
-            if (!eglDisplay || !s_globalShareContext) {
-                return;
-            }
-            s_globalShareContext.reset();
-            kwinApp()->outputBackend()->setSceneEglGlobalShareContext(nullptr);
-        });
-    }
-    if (s_globalShareContext) {
-        kwinApp()->outputBackend()->setSceneEglGlobalShareContext(s_globalShareContext.get());
-        return true;
-    } else {
-        return false;
-    }
+    return ensureEglGlobalShareContext(m_renderDevice->eglDisplay());
 }
 
 void EglBackend::cleanup()

@@ -14,9 +14,11 @@
 #include "core/drmdevice.h"
 #include "core/inputdevice.h"
 #include "core/renderbackend.h"
+#include "core/syncobjtimeline.h"
 #include "input_event.h"
 #include "logging_p.h"
 #include "opengl/eglcontext.h"
+#include "opengl/egldisplay.h"
 #include "opengl/eglnativefence.h"
 #include "opengl/eglswapchain.h"
 #include "opengl/glrendertimequery.h"
@@ -45,8 +47,13 @@
 #include <QTimer>
 #include <private/qeventpoint_p.h> // for QMutableEventPoint
 
+#include <map>
+#include <unordered_set>
+
 namespace KWin
 {
+
+static QHash<QQuickWindow *, OffscreenQuickView *> s_offscreenQuickViews;
 
 class Q_DECL_HIDDEN OffscreenQuickView::Private
 {
@@ -85,6 +92,8 @@ public:
     bool m_automaticRepaint = true;
 
     std::optional<qreal> m_explicitDpr;
+
+    std::map<const void *, std::weak_ptr<SyncReleasePoint>> m_textureReleasePoints;
 
     QPointingDevice *mouseDevice;
     QPointingDevice *touchpadDevice;
@@ -154,6 +163,7 @@ OffscreenQuickView::OffscreenQuickView(ExportMode exportMode, bool alpha)
     d->m_renderControl = std::make_unique<QQuickRenderControl>();
 
     d->m_view = std::make_unique<QQuickWindow>(d->m_renderControl.get());
+    s_offscreenQuickViews.insert(d->m_view.get(), this);
     Q_ASSERT(d->m_view->setProperty("_KWIN_WINDOW_IS_OFFSCREEN", true) || true);
     d->m_view->setFlags(Qt::FramelessWindowHint);
     d->m_view->setColor(Qt::transparent);
@@ -228,6 +238,8 @@ OffscreenQuickView::~OffscreenQuickView()
 {
     disconnect(d->m_renderControl.get(), &QQuickRenderControl::renderRequested, this, &OffscreenQuickView::handleRenderRequested);
     disconnect(d->m_renderControl.get(), &QQuickRenderControl::sceneChanged, this, &OffscreenQuickView::handleSceneChanged);
+
+    s_offscreenQuickViews.remove(d->m_view.get());
 
     if (d->m_glcontext) {
         // close the view whilst we have an active GL context
@@ -316,16 +328,23 @@ void OffscreenQuickView::update(OutputFrame *frame)
             fboFormat.setInternalTextureFormat(GL_RGBA8);
 
             const uint32_t format = d->m_hasAlphaChannel ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_XRGB8888;
+            const ModifierList eglModifiers = EglContext::currentContext()->displayObject()->nonExternalOnlySupportedDrmFormats().value(format);
             if (d->m_scanoutDevice) {
-                d->m_swapchain = EglSwapchain::create(d->m_scanoutDevice->allocator(),
-                                                      EglContext::currentContext(), nativeSize,
-                                                      format, d->m_scanoutFormats.value(format));
+                const ModifierList modifiers = d->m_scanoutFormats.value(format).intersected(eglModifiers);
+                if (!modifiers.isEmpty()) {
+                    d->m_swapchain = EglSwapchain::create(d->m_scanoutDevice->allocator(),
+                                                          EglContext::currentContext(), nativeSize,
+                                                          format, modifiers);
+                }
             }
             if (!d->m_swapchain) {
                 // TODO add non-scanout feedback on the item for this?
-                d->m_swapchain = EglSwapchain::create(Compositor::self()->backend()->drmDevice()->allocator(),
-                                                      EglContext::currentContext(), nativeSize,
-                                                      format, Compositor::self()->backend()->supportedFormats()[format]);
+                const ModifierList modifiers = Compositor::self()->backend()->supportedFormats().value(format).intersected(eglModifiers);
+                if (!modifiers.isEmpty()) {
+                    d->m_swapchain = EglSwapchain::create(Compositor::self()->backend()->drmDevice()->allocator(),
+                                                          EglContext::currentContext(), nativeSize,
+                                                          format, modifiers);
+                }
             }
             if (!d->m_swapchain) {
                 d->m_glcontext->doneCurrent();
@@ -376,7 +395,25 @@ void OffscreenQuickView::update(OutputFrame *frame)
 
     if (usingGl) {
         EGLNativeFence fence(EglContext::currentContext()->displayObject());
-        d->m_swapchain->release(d->m_currentSlot, fence.takeFileDescriptor());
+        if (!fence.isValid()) {
+            glFinish();
+        } else {
+            std::unordered_set<SyncReleasePoint *> fencedReleasePoints;
+            for (auto it = d->m_textureReleasePoints.begin(); it != d->m_textureReleasePoints.end();) {
+                const std::shared_ptr<SyncReleasePoint> releasePoint = it->second.lock();
+                if (!releasePoint) {
+                    it = d->m_textureReleasePoints.erase(it);
+                    continue;
+                }
+                if (fencedReleasePoints.insert(releasePoint.get()).second) {
+                    releasePoint->addReleaseFence(fence.fileDescriptor());
+                }
+                ++it;
+            }
+        }
+        FileDescriptor renderingFence = fence.takeFileDescriptor();
+        d->m_surfaceItem->setAcquireFence(renderingFence.duplicate());
+        d->m_swapchain->release(d->m_currentSlot, std::move(renderingFence));
         QOpenGLFramebufferObject::bindDefault();
         if (frame && renderTime) {
             renderTime->end();
@@ -388,6 +425,21 @@ void OffscreenQuickView::update(OutputFrame *frame)
         }
     }
     d->m_item->scheduleRepaint(d->m_item->rect());
+}
+
+void OffscreenQuickView::registerTextureReleasePoint(const void *owner, const std::weak_ptr<SyncReleasePoint> &releasePoint)
+{
+    d->m_textureReleasePoints[owner] = releasePoint;
+}
+
+void OffscreenQuickView::unregisterTextureReleasePoint(const void *owner)
+{
+    d->m_textureReleasePoints.erase(owner);
+}
+
+OffscreenQuickView *OffscreenQuickView::findView(QQuickWindow *window)
+{
+    return s_offscreenQuickViews.value(window);
 }
 
 void OffscreenQuickView::forwardKeyEvent(QKeyEvent *keyEvent)

@@ -8,11 +8,17 @@
 
 #include "windowthumbnailitem.h"
 #include "compositor.h"
+#include "core/drmdevice.h"
 #include "core/renderbackend.h"
+#include "core/renderdevice.h"
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effect.h"
+#include "effect/offscreenquickview.h"
 #include "opengl/eglcontext.h"
+#include "opengl/egldisplay.h"
+#include "opengl/eglnativefence.h"
+#include "opengl/eglswapchain.h"
 #include "opengl/glframebuffer.h"
 #include "scene/itemrenderer.h"
 #include "scene/windowitem.h"
@@ -22,25 +28,53 @@
 #include "workspace.h"
 
 #include "opengl/gltexture.h"
+#include "vulkan/vulkan_backend.h"
+#include "vulkan/vulkan_device.h"
+#include "vulkan/vulkan_rendertarget.h"
+#include "vulkan/vulkan_texture.h"
 
 #include <QOpenGLContext>
 #include <QQuickWindow>
 #include <QRunnable>
 #include <QSGImageNode>
 #include <QSGTextureProvider>
+#include <QScopeGuard>
+
+#include <cerrno>
+#include <drm_fourcc.h>
+#include <poll.h>
 
 namespace KWin
 {
 
-static bool useNativeGlThumbnails()
+static bool qtQuickUsesOpenGl()
 {
     static bool qtQuickIsSoftware = QStringList({QStringLiteral("software"), QStringLiteral("softwarecontext")}).contains(QQuickWindow::sceneGraphBackend());
-    return Compositor::self()->backend() && Compositor::self()->backend()->compositingType() == OpenGLCompositing && !qtQuickIsSoftware;
+    return !qtQuickIsSoftware;
 }
 
 static bool useOpenGlRenderer()
 {
     return Compositor::self()->backend() && Compositor::self()->backend()->compositingType() == OpenGLCompositing;
+}
+
+static bool useNativeGlThumbnails()
+{
+    return useOpenGlRenderer() && qtQuickUsesOpenGl();
+}
+
+static bool waitForFence(const FileDescriptor &fd)
+{
+    pollfd descriptor{
+        .fd = fd.get(),
+        .events = POLLIN,
+        .revents = 0,
+    };
+    int result;
+    do {
+        result = poll(&descriptor, 1, -1);
+    } while (result < 0 && errno == EINTR);
+    return result == 1 && (descriptor.revents & POLLIN);
 }
 
 WindowThumbnailSource::WindowThumbnailSource(QQuickWindow *view, Window *handle)
@@ -67,14 +101,19 @@ WindowThumbnailSource::~WindowThumbnailSource()
         m_handle->unrefOffscreenRendering();
     }
 
-    if (!m_offscreenTexture) {
-        return;
-    }
-    if (!QOpenGLContext::currentContext()) {
+    if (m_offscreenTexture && !QOpenGLContext::currentContext()) {
         kwinApp()->scene()->openglContext()->makeCurrent();
     }
     m_offscreenTarget.reset();
     m_offscreenTexture.reset();
+
+    if (m_vulkanSwapchain) {
+        const auto backend = qobject_cast<VulkanBackend *>(Compositor::self()->backend());
+        if (backend && backend->openglContext()) {
+            backend->openglContext()->makeCurrent();
+        }
+        resetVulkanTarget();
+    }
 
     if (m_acquireFence) {
         glDeleteSync(m_acquireFence);
@@ -107,16 +146,65 @@ std::shared_ptr<WindowThumbnailSource> WindowThumbnailSource::getOrCreate(QQuick
 
 WindowThumbnailSource::Frame WindowThumbnailSource::acquire()
 {
+    std::weak_ptr<SyncReleasePoint> releasePoint;
+    std::shared_ptr<GLTexture> texture;
+    if (m_vulkanSlot) {
+        releasePoint = m_vulkanSlot->releasePoint();
+        texture = m_vulkanSlot->texture();
+    } else if (m_offscreenImage.isNull()) {
+        texture = m_offscreenTexture;
+    }
     return Frame{
-        .texture = m_offscreenImage.isNull() ? m_offscreenTexture : nullptr,
+        .texture = std::move(texture),
         .fence = std::exchange(m_acquireFence, nullptr),
+        .nativeFence = std::move(m_vulkanAcquireFence),
+        .releasePoint = std::move(releasePoint),
         .image = m_offscreenImage,
     };
 }
 
+void WindowThumbnailSource::resetVulkanTarget()
+{
+    m_vulkanAcquireFence = {};
+    m_vulkanTarget.reset();
+    m_vulkanTexture.reset();
+    m_vulkanSlot.reset();
+    m_vulkanSwapchain.reset();
+}
+
+bool WindowThumbnailSource::ensureVulkanTarget(const QSize &size)
+{
+    if (m_vulkanSwapchain && m_vulkanSwapchain->size() == size) {
+        return true;
+    }
+
+    resetVulkanTarget();
+    const auto backend = qobject_cast<VulkanBackend *>(Compositor::self()->backend());
+    RenderDevice *renderDevice = backend ? backend->renderDevice() : nullptr;
+    VulkanDevice *device = backend ? backend->device() : nullptr;
+    EglContext *eglContext = backend ? backend->openglContext() : nullptr;
+    if (!renderDevice || !renderDevice->drmDevice() || !renderDevice->eglDisplay() || !device || !eglContext) {
+        return false;
+    }
+
+    const uint32_t format = DRM_FORMAT_ABGR8888;
+    const ModifierList modifiers = device->computeOutputFormats().value(format).intersected(
+        renderDevice->eglDisplay()->nonExternalOnlySupportedDrmFormats().value(format));
+    if (modifiers.isEmpty()) {
+        return false;
+    }
+
+    m_vulkanSwapchain = EglSwapchain::create(renderDevice->drmDevice()->allocator(),
+                                             eglContext,
+                                             size,
+                                             format,
+                                             modifiers);
+    return bool(m_vulkanSwapchain);
+}
+
 void WindowThumbnailSource::update()
 {
-    if (m_acquireFence || !m_dirty || !m_handle) {
+    if (m_acquireFence || m_vulkanAcquireFence.isValid() || !m_dirty || !m_handle) {
         return;
     }
     Q_ASSERT(m_view);
@@ -126,6 +214,7 @@ void WindowThumbnailSource::update()
     const QSize textureSize = geometry.toAlignedRect().size() * devicePixelRatio;
 
     const bool usingOpenGl = useOpenGlRenderer();
+    bool usingNativeVulkan = false;
     if (usingOpenGl) {
         if (!m_offscreenTexture || m_offscreenTexture->size() != textureSize) {
             m_offscreenTexture = GLTexture::allocate(GL_RGBA8, textureSize);
@@ -137,26 +226,63 @@ void WindowThumbnailSource::update()
             m_offscreenTexture->setWrapMode(GL_CLAMP_TO_EDGE);
             m_offscreenTarget = std::make_unique<GLFramebuffer>(m_offscreenTexture.get());
         }
-    } else if (m_offscreenImage.size() != textureSize) {
+    } else if (qtQuickUsesOpenGl() && OffscreenQuickView::findView(m_view)) {
+        const auto backend = qobject_cast<VulkanBackend *>(Compositor::self()->backend());
+        EglContext *eglContext = backend ? backend->openglContext() : nullptr;
+        EglContext *previousContext = EglContext::currentContext();
+        if (eglContext && eglContext->makeCurrent()) {
+            const auto restoreContext = qScopeGuard([eglContext, previousContext]() {
+                if (previousContext && previousContext != eglContext) {
+                    previousContext->makeCurrent();
+                } else if (!previousContext) {
+                    eglContext->doneCurrent();
+                }
+            });
+            if (ensureVulkanTarget(textureSize)) {
+                m_vulkanTarget.reset();
+                m_vulkanTexture.reset();
+                m_vulkanSlot.reset();
+                m_vulkanSlot = m_vulkanSwapchain->acquire();
+                if (m_vulkanSlot) {
+                    m_vulkanTexture = backend->device()->importBuffer(
+                        m_vulkanSlot->buffer(),
+                        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+                    if (m_vulkanTexture) {
+                        m_vulkanTarget = std::make_unique<VulkanRenderTarget>(
+                            m_vulkanTexture.get(),
+                            m_vulkanSlot->releaseFd().duplicate());
+                        usingNativeVulkan = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!usingOpenGl && !usingNativeVulkan && m_offscreenImage.size() != textureSize) {
         m_offscreenImage = QImage(textureSize, QImage::Format_RGBA8888_Premultiplied);
     }
 
-    if (!usingOpenGl) {
+    if (!usingOpenGl && !usingNativeVulkan) {
         m_offscreenImage.fill(Qt::transparent);
     }
-    RenderTarget offscreenRenderTarget = usingOpenGl
-        ? RenderTarget(m_offscreenTarget.get())
-        : RenderTarget(&m_offscreenImage);
-    RenderViewport offscreenViewport(geometry, devicePixelRatio, offscreenRenderTarget, QPoint());
+    std::unique_ptr<RenderTarget> offscreenRenderTarget;
+    if (usingOpenGl) {
+        offscreenRenderTarget = std::make_unique<RenderTarget>(m_offscreenTarget.get());
+    } else if (usingNativeVulkan) {
+        offscreenRenderTarget = std::make_unique<RenderTarget>(m_vulkanTarget.get());
+    } else {
+        offscreenRenderTarget = std::make_unique<RenderTarget>(&m_offscreenImage);
+    }
+    RenderViewport offscreenViewport(geometry, devicePixelRatio, *offscreenRenderTarget, QPoint());
 
-    // The thumbnail must be rendered using kwin's opengl context as VAOs are not
-    // shared across contexts. Unfortunately, this also introduces a latency of 1
-    // frame, which is not ideal, but it is acceptable for things such as thumbnails.
+    // The OpenGL renderer must use KWin's context because VAOs are not shared
+    // across contexts. The Vulkan renderer writes directly to the dma-buf that
+    // Qt Quick imports in its shared OpenGL context.
     const int mask = Scene::PAINT_WINDOW_TRANSFORMED;
     ItemRenderer *renderer = kwinApp()->scene()->renderer();
-    renderer->beginFrame(offscreenRenderTarget, offscreenViewport);
-    renderer->renderBackground(offscreenRenderTarget, offscreenViewport, offscreenRenderTarget.transformedRect());
-    renderer->renderItem(offscreenRenderTarget, offscreenViewport, m_handle->windowItem(), mask, Region::infinite(), WindowPaintData{}, {}, {});
+    renderer->beginFrame(*offscreenRenderTarget, offscreenViewport);
+    renderer->renderBackground(*offscreenRenderTarget, offscreenViewport, offscreenRenderTarget->transformedRect());
+    renderer->renderItem(*offscreenRenderTarget, offscreenViewport, m_handle->windowItem(), mask, Region::infinite(), WindowPaintData{}, {}, {});
     renderer->endFrame();
 
     m_dirty = false;
@@ -169,6 +295,18 @@ void WindowThumbnailSource::update()
         // The software Qt Quick scene graph can't consume a native GL texture.
         // Read it back and let Qt create a software scene-graph texture instead.
         m_offscreenImage = m_offscreenTexture->toImage().mirrored(false, true);
+    } else if (usingNativeVulkan) {
+        m_offscreenImage = QImage();
+        m_vulkanAcquireFence = m_vulkanTarget->takeCompletionFence();
+        if (!m_vulkanAcquireFence.isValid()) {
+            m_dirty = true;
+            return;
+        }
+        // This release point belongs only to the KWin-owned thumbnail target.
+        // The source window buffers were fenced by ItemRendererVulkan above and
+        // can be released as soon as the Vulkan render completes. Qt Quick's GL
+        // consumer fence is merged into this target release point later.
+        m_vulkanSwapchain->release(m_vulkanSlot, m_vulkanAcquireFence.duplicate());
     }
 
     Q_EMIT changed();
@@ -178,13 +316,16 @@ class ThumbnailTextureProvider : public QSGTextureProvider
 {
 public:
     explicit ThumbnailTextureProvider(QQuickWindow *window);
+    ~ThumbnailTextureProvider() override;
 
     QSGTexture *texture() const override;
-    void setTexture(const std::shared_ptr<GLTexture> &nativeTexture);
+    void setTexture(const std::shared_ptr<GLTexture> &nativeTexture, const std::weak_ptr<SyncReleasePoint> &releasePoint);
     void setImage(const QImage &image);
     void setTexture(QSGTexture *texture);
 
 private:
+    void setReleasePoint(const std::weak_ptr<SyncReleasePoint> &releasePoint);
+
     QQuickWindow *m_window;
     std::shared_ptr<GLTexture> m_nativeTexture;
     std::unique_ptr<QSGTexture> m_texture;
@@ -195,13 +336,32 @@ ThumbnailTextureProvider::ThumbnailTextureProvider(QQuickWindow *window)
 {
 }
 
+ThumbnailTextureProvider::~ThumbnailTextureProvider()
+{
+    if (OffscreenQuickView *view = OffscreenQuickView::findView(m_window)) {
+        view->unregisterTextureReleasePoint(this);
+    }
+}
+
 QSGTexture *ThumbnailTextureProvider::texture() const
 {
     return m_texture.get();
 }
 
-void ThumbnailTextureProvider::setTexture(const std::shared_ptr<GLTexture> &nativeTexture)
+void ThumbnailTextureProvider::setReleasePoint(const std::weak_ptr<SyncReleasePoint> &releasePoint)
 {
+    if (OffscreenQuickView *view = OffscreenQuickView::findView(m_window)) {
+        if (releasePoint.expired()) {
+            view->unregisterTextureReleasePoint(this);
+        } else {
+            view->registerTextureReleasePoint(this, releasePoint);
+        }
+    }
+}
+
+void ThumbnailTextureProvider::setTexture(const std::shared_ptr<GLTexture> &nativeTexture, const std::weak_ptr<SyncReleasePoint> &releasePoint)
+{
+    setReleasePoint(releasePoint);
     if (m_nativeTexture != nativeTexture) {
         const GLuint textureId = nativeTexture->texture();
         m_nativeTexture = nativeTexture;
@@ -219,6 +379,7 @@ void ThumbnailTextureProvider::setTexture(const std::shared_ptr<GLTexture> &nati
 
 void ThumbnailTextureProvider::setImage(const QImage &image)
 {
+    setReleasePoint({});
     m_nativeTexture = nullptr;
     m_texture.reset(m_window->createTextureFromImage(image, QQuickWindow::TextureHasAlphaChannel));
     if (m_texture) {
@@ -231,6 +392,7 @@ void ThumbnailTextureProvider::setImage(const QImage &image)
 
 void ThumbnailTextureProvider::setTexture(QSGTexture *texture)
 {
+    setReleasePoint({});
     m_nativeTexture = nullptr;
     m_texture.reset(texture);
     Q_EMIT textureChanged();
@@ -337,7 +499,7 @@ QSGNode *WindowThumbnailItem::updatePaintNode(QSGNode *oldNode, QQuickItem::Upda
         return nullptr;
     }
 
-    auto [texture, acquireFence, image] = m_source->acquire();
+    auto [texture, acquireFence, nativeFence, releasePoint, image] = m_source->acquire();
     if (!texture && image.isNull()) {
         return oldNode;
     }
@@ -347,12 +509,26 @@ QSGNode *WindowThumbnailItem::updatePaintNode(QSGNode *oldNode, QQuickItem::Upda
         glWaitSync(acquireFence, 0, GL_TIMEOUT_IGNORED);
         glDeleteSync(acquireFence);
     }
+    if (nativeFence.isValid()) {
+        EglContext *context = EglContext::currentContext();
+        if (context) {
+            const EGLNativeFence fence = EGLNativeFence::importFence(context->displayObject(), std::move(nativeFence));
+            const bool waited = nativeFence.isValid() ? waitForFence(nativeFence) : fence.waitSync();
+            if (!waited) {
+                qCWarning(KWIN_SCRIPTING) << "Failed to wait for a Vulkan window thumbnail";
+                return oldNode;
+            }
+        } else if (!waitForFence(nativeFence)) {
+            qCWarning(KWIN_SCRIPTING) << "Failed to wait for a Vulkan window thumbnail without an EGL context";
+            return oldNode;
+        }
+    }
 
     if (!m_provider) {
         m_provider = new ThumbnailTextureProvider(window());
     }
     if (texture) {
-        m_provider->setTexture(texture);
+        m_provider->setTexture(texture, releasePoint);
     } else {
         m_provider->setImage(image);
     }

@@ -10,6 +10,7 @@
 #pragma once
 
 #include "core/graphicsbuffer.h"
+#include "utils/filedescriptor.h"
 #include "window.h"
 
 namespace KWin
@@ -20,6 +21,8 @@ struct InternalWindowFrame
     GraphicsBuffer *buffer = nullptr;
     Region bufferDamage;
     OutputTransform bufferTransform = OutputTransform::Normal;
+    FileDescriptor acquireFence;
+    std::shared_ptr<SyncReleasePoint> releasePoint;
 };
 
 class KWIN_EXPORT InternalWindow : public Window
@@ -64,6 +67,8 @@ public:
 
     GraphicsBuffer *graphicsBuffer() const;
     OutputTransform bufferTransform() const;
+    FileDescriptor takeAcquireFence();
+    std::shared_ptr<SyncReleasePoint> takeReleasePoint();
 
     void present(const InternalWindowFrame &frame);
     qreal bufferScale() const;
@@ -96,6 +101,8 @@ private:
     DecorationPolicy m_decorationPolicy = DecorationPolicy::PreferredByClient;
     GraphicsBufferRef m_graphicsBufferRef;
     OutputTransform m_bufferTransform = OutputTransform::Normal;
+    FileDescriptor m_acquireFence;
+    std::shared_ptr<SyncReleasePoint> m_releasePoint;
 
     Q_DISABLE_COPY(InternalWindow)
 };

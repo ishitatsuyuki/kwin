@@ -7,7 +7,9 @@
 
 #include "core/drmdevice.h"
 #include "core/renderdevice.h"
+#include "opengl/eglbackend.h"
 #include "opengl/eglcontext.h"
+#include "opengl/egldisplay.h"
 #include "vulkan_device.h"
 #include "wayland/linuxdmabufv1clientbuffer.h"
 #include "wayland_server.h"
@@ -70,6 +72,23 @@ void VulkanBackend::initWayland()
     waylandServer()->setRenderBackend(this);
 }
 
+bool VulkanBackend::initializeQuickRenderer()
+{
+    if (!ensureEglGlobalShareContext(m_renderDevice->eglDisplay())) {
+        return false;
+    }
+    const FormatModifierMap eglFormats = m_renderDevice->eglDisplay()->nonExternalOnlySupportedDrmFormats();
+    const FormatModifierMap vulkanFormats = supportedFormats();
+    for (auto it = eglFormats.begin(); it != eglFormats.end(); ++it) {
+        const auto info = FormatInfo::get(it.key());
+        if (info && info->bitsPerColor == 8 && info->alphaBits == 8
+            && !it.value().intersected(vulkanFormats.value(it.key())).isEmpty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 RenderDevice *VulkanBackend::renderDevice() const
 {
     return m_renderDevice;
@@ -83,7 +102,7 @@ VulkanDevice *VulkanBackend::device() const
 EglContext *VulkanBackend::openglContext() const
 {
     if (!m_openglContext || m_openglContext->isFailed()) {
-        m_openglContext = m_renderDevice->eglContext();
+        m_openglContext = m_renderDevice->eglContext(ensureEglGlobalShareContext(m_renderDevice->eglDisplay()));
     }
     return m_openglContext && !m_openglContext->isFailed() ? m_openglContext.get() : nullptr;
 }

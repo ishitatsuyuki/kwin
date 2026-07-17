@@ -29,6 +29,12 @@ class RenderDevice;
 
 struct DmaBufAttributes;
 
+/**
+ * Ensures that the compositor-wide EGL share context exists and returns it.
+ * The returned context must never be made current.
+ */
+KWIN_EXPORT EglContext *ensureEglGlobalShareContext(EglDisplay *display);
+
 class KWIN_EXPORT EglBackend : public RenderBackend
 {
     Q_OBJECT

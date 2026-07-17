@@ -7,6 +7,9 @@
 
 #pragma once
 
+#include "kwin_export.h"
+#include "utils/filedescriptor.h"
+
 #include <QImage>
 #include <QQuickItem>
 #include <QUuid>
@@ -19,10 +22,15 @@ namespace KWin
 class Window;
 class GLFramebuffer;
 class GLTexture;
+class EglSwapchain;
+class EglSwapchainSlot;
+class SyncReleasePoint;
 class ThumbnailTextureProvider;
+class VulkanRenderTarget;
+class VulkanTexture;
 class WindowThumbnailSource;
 
-class WindowThumbnailSource : public QObject
+class KWIN_EXPORT WindowThumbnailSource : public QObject
 {
     Q_OBJECT
 
@@ -36,6 +44,8 @@ public:
     {
         std::shared_ptr<GLTexture> texture;
         GLsync fence;
+        FileDescriptor nativeFence;
+        std::weak_ptr<SyncReleasePoint> releasePoint;
         QImage image;
     };
 
@@ -45,6 +55,8 @@ Q_SIGNALS:
     void changed();
 
 private:
+    bool ensureVulkanTarget(const QSize &size);
+    void resetVulkanTarget();
     void update();
 
     QPointer<QQuickWindow> m_view;
@@ -54,6 +66,11 @@ private:
     std::unique_ptr<GLFramebuffer> m_offscreenTarget;
     QImage m_offscreenImage;
     GLsync m_acquireFence = 0;
+    std::shared_ptr<EglSwapchain> m_vulkanSwapchain;
+    std::shared_ptr<EglSwapchainSlot> m_vulkanSlot;
+    std::shared_ptr<VulkanTexture> m_vulkanTexture;
+    std::unique_ptr<VulkanRenderTarget> m_vulkanTarget;
+    FileDescriptor m_vulkanAcquireFence;
     bool m_dirty = true;
 };
 

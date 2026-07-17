@@ -290,9 +290,14 @@ void Compositor::start()
             QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
             break;
         case VulkanCompositing:
-            // Qt Quick render nodes are converted to image items until native
-            // QRhi/Vulkan effect integration is implemented.
-            QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+            if (static_cast<VulkanBackend *>(m_backend.get())->initializeQuickRenderer()) {
+                // Qt Quick renders into dma-bufs through KWin's QPA. The
+                // Vulkan scene imports those buffers as sampled images.
+                QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+            } else {
+                qCWarning(KWIN_CORE) << "Failed to initialize OpenGL for Qt Quick; falling back to software rendering";
+                QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+            }
             break;
         }
     }

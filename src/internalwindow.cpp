@@ -394,6 +394,16 @@ OutputTransform InternalWindow::bufferTransform() const
     return m_bufferTransform;
 }
 
+FileDescriptor InternalWindow::takeAcquireFence()
+{
+    return std::move(m_acquireFence);
+}
+
+std::shared_ptr<SyncReleasePoint> InternalWindow::takeReleasePoint()
+{
+    return std::move(m_releasePoint);
+}
+
 void InternalWindow::present(const InternalWindowFrame &frame)
 {
     RectF geometry(clientRectToFrameRect(m_handle->geometry()));
@@ -405,6 +415,8 @@ void InternalWindow::present(const InternalWindowFrame &frame)
 
     m_graphicsBufferRef = frame.buffer;
     m_bufferTransform = frame.bufferTransform;
+    m_acquireFence = frame.acquireFence.duplicate();
+    m_releasePoint = frame.releasePoint;
 
     Q_EMIT presented(frame);
 

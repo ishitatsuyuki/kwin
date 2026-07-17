@@ -62,11 +62,11 @@ test unless the item explicitly says otherwise.
 - [x] Wayland explicit host synchronization protocol (`linux-drm-syncobj-v1` acquire fences and per-commit release timelines for output and hardware-cursor dma-bufs; live host protocol trace under Vulkan validation)
 - [x] Screenshot and screencast paths (output, region, and window capture; PipeWire memfd and directly rendered dma-buf buffers with syncobj fences)
 - [x] Embedded and metadata cursor capture paths
-- [x] Qt Quick software scene-graph integration, including live Vulkan-rendered window thumbnails for Quick effects
+- [x] Qt Quick OpenGL/dma-buf scene-graph integration, including internal windows, native Vulkan window-thumbnail targets, two-way Vulkan/EGL fences, compositor release fencing, and a software fallback when native sharing is unavailable
 
 ## Effect compatibility
 
-- [x] Quick scene effects (Overview, Window View, and Tiles Editor) through the software scene graph
+- [x] Quick scene effects (Overview, Window View, and Tiles Editor) through the OpenGL/dma-buf scene graph, including zero-copy Vulkan window thumbnails and a software fallback
 - [x] Show FPS and Show Compositing overlays
 - [x] Image-item overlays (Screen Edge, Track Mouse, and Shake Cursor; Shake Cursor is compile-tested on Vulkan)
 - [x] Color Picker 1x1 Vulkan scene capture (compile-tested; interactive D-Bus coverage pending)
@@ -93,7 +93,7 @@ test unless the item explicitly says otherwise.
 - [x] ICC and output-calibration scene corpus (BToA, shaper-matrix, and MHC2 profiles)
 - [x] Vulkan validation with zero errors
 - [x] Live KWin virtual-output frame under Vulkan validation
-- [x] Live Qt Quick window-thumbnail scene through a Vulkan virtual output
+- [x] Internal-window and offscreen Qt Quick scenes through a Vulkan virtual output (OpenGL/dma-buf path and native Vulkan-to-EGL window thumbnails validation-tested)
 - [x] Legacy GL fragment-shader bridge with two-way Vulkan/EGL native-fence synchronization, orientation-sensitive pixels, and late shader installation
 - [x] GPU preprocessing/composition microbenchmark
 - [x] Overdraw-heavy GPU-time comparison with the OpenGL backend (optimized common compute is slightly faster at 16/64 translucent layers on Navi 10; opaque front-to-back termination is substantially faster before scene occlusion)
@@ -388,6 +388,30 @@ with:
 ```sh
 build/bin/vulkanCompositorBenchmark -median 5 -iterations 10 benchmarkDownload
 ```
+
+## Resolved performance bug: Vulkan thumbnails round-tripped through host memory
+
+The OpenGL Qt Quick scene graph previously received Vulkan-rendered window
+thumbnails through `VulkanTexture::download()` followed by
+`QQuickWindow::createTextureFromImage()`. Even with cached readback memory, this
+serialized the Vulkan producer with a full image readback and then uploaded the
+same pixels through Mesa's `glTexSubImage2D` path on every thumbnail update.
+
+Offscreen Quick views now allocate KWin-owned ABGR8888 dma-buf slots whose
+format and modifier are supported as both Vulkan storage images and ordinary
+EGL textures. Vulkan renders the thumbnail directly into the slot, Qt Quick
+samples the imported GL texture, and native sync-file fences provide both
+Vulkan-to-EGL producer ordering and EGL-to-Vulkan slot-reuse ordering. There is
+no host image copy or upload in this path. The source client/WSI buffers retain
+their original Vulkan render-completion release points; the later Qt Quick GL
+fence is attached only to the KWin-owned thumbnail target, so native handoff
+does not extend client-buffer lifetime. Software Qt Quick and systems without a
+jointly supported native format retain the `QImage` fallback.
+
+The Vulkan integration regression uses an orientation-sensitive two-color
+thumbnail, asserts that Qt Quick receives a native texture rather than a
+`QImage`, then damages the source and verifies a second frame. This covers the
+producer fence, GL consumer fence, and safe target-slot reuse under validation.
 
 ## Planned optimization passes
 

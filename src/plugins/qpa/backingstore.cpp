@@ -102,9 +102,16 @@ void BackingStore::flush(QWindow *window, const QRegion &region, const QPoint &o
                             .intersected(bufferRect);
     }
 
+    Swapchain *swapchain = platformWindow->swapchain(nullptr, {{DRM_FORMAT_ARGB8888, {DRM_FORMAT_MOD_LINEAR}}});
+    if (!swapchain) {
+        return;
+    }
+
     internalWindow->present(InternalWindowFrame{
         .buffer = m_buffer,
         .bufferDamage = bufferDamage,
+        .acquireFence = {},
+        .releasePoint = swapchain->releasePoint(m_buffer),
     });
 }
 

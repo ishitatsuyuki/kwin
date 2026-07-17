@@ -9,12 +9,15 @@
 */
 
 #include "eglplatformcontext.h"
+#include "compositor.h"
 #include "core/outputbackend.h"
+#include "core/renderbackend.h"
 #include "eglhelpers.h"
 #include "internalwindow.h"
 #include "offscreensurface.h"
 #include "opengl/eglcontext.h"
 #include "opengl/egldisplay.h"
+#include "opengl/eglnativefence.h"
 #include "opengl/eglutils_p.h"
 #include "opengl/glutils.h"
 #include "swapchain.h"
@@ -26,6 +29,20 @@ namespace KWin
 {
 namespace QPA
 {
+
+static FormatModifierMap renderableFormats(EglDisplay *display)
+{
+    const FormatModifierMap eglFormats = display->nonExternalOnlySupportedDrmFormats();
+    const FormatModifierMap compositorFormats = Compositor::self()->backend()->supportedFormats();
+    FormatModifierMap ret;
+    for (auto it = eglFormats.begin(); it != eglFormats.end(); ++it) {
+        const ModifierList modifiers = it.value().intersected(compositorFormats.value(it.key()));
+        if (!modifiers.isEmpty()) {
+            ret.insert(it.key(), modifiers);
+        }
+    }
+    return ret;
+}
 
 EGLRenderTarget::EGLRenderTarget(GraphicsBuffer *buffer, std::unique_ptr<GLFramebuffer> fbo, std::shared_ptr<GLTexture> texture)
     : buffer(buffer)
@@ -79,7 +96,7 @@ bool EGLPlatformContext::makeCurrent(QPlatformSurface *surface)
 
     if (surface->surface()->surfaceClass() == QSurface::Window) {
         Window *window = static_cast<Window *>(surface);
-        Swapchain *swapchain = window->swapchain(m_eglContext, m_eglDisplay->nonExternalOnlySupportedDrmFormats());
+        Swapchain *swapchain = window->swapchain(m_eglContext, renderableFormats(m_eglDisplay));
         if (!swapchain) {
             return false;
         }
@@ -157,12 +174,21 @@ void EGLPlatformContext::swapBuffers(QPlatformSurface *surface)
             return;
         }
 
-        glFlush(); // We need to flush pending rendering commands manually
+        EGLNativeFence fence(m_eglDisplay);
+        if (!fence.isValid()) {
+            // Without native fences, finish before publishing the buffer so
+            // consumers in another graphics API cannot observe partial work.
+            glFinish();
+        }
+
+        Swapchain *swapchain = window->swapchain(m_eglContext, renderableFormats(m_eglDisplay));
 
         internalWindow->present(InternalWindowFrame{
             .buffer = m_current->buffer,
             .bufferDamage = Rect(QPoint(0, 0), m_current->buffer->size()),
             .bufferTransform = OutputTransform::FlipY,
+            .acquireFence = fence.takeFileDescriptor(),
+            .releasePoint = swapchain->releasePoint(m_current->buffer),
         });
 
         m_current.reset();
