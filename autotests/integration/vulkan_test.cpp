@@ -748,6 +748,14 @@ void VulkanTest::testComputeColorConversion()
     QVERIFY(std::abs(actual.green() - expected.green()) <= 2);
     QVERIFY(std::abs(actual.blue() - expected.blue()) <= 2);
     QCOMPARE(actual.alpha(), 255);
+
+    auto identityResult = compositor->render(QSize(4, 4), layers, Qt::transparent, Region::infinite(), sourceColor);
+    QVERIFY(identityResult);
+    const QColor identityActual = identityResult->texture->download().pixelColor(1, 1);
+    QVERIFY(std::abs(identityActual.red() - encodedSource.red()) <= 1);
+    QVERIFY(std::abs(identityActual.green() - encodedSource.green()) <= 1);
+    QVERIFY(std::abs(identityActual.blue() - encodedSource.blue()) <= 1);
+    QCOMPARE(identityActual.alpha(), encodedSource.alpha());
 }
 
 void VulkanTest::testComputeHdrToneMapping()

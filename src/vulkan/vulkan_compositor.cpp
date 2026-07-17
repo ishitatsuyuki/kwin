@@ -155,9 +155,12 @@ bool validateShaderInterface(const QShader &shader, const QString &path)
     }
 
     const bool simpleCompositeShader = path.contains(QStringLiteral("tile_composite_simple"));
+    const bool colorCompositeShader = path.contains(QStringLiteral("tile_composite_color"));
     const bool compositeShader = path.contains(QStringLiteral("tile_composite"));
     const std::array expectedBindings = simpleCompositeShader
         ? std::array{false, true, true, true, true, false, true}
+        : colorCompositeShader
+        ? std::array{true, true, true, true, true, false, false}
         : compositeShader
         ? std::array{true, true, true, true, true, true, false}
         : std::array{false, true, false, false, true, false, true};
@@ -296,6 +299,7 @@ VulkanCompositor::VulkanCompositor(VulkanDevice *device)
     , m_pipelineLayout(nullptr)
     , m_preprocessPipeline(nullptr)
     , m_compositePipeline(nullptr)
+    , m_colorCompositePipeline(nullptr)
     , m_simpleCompositePipeline(nullptr)
     , m_shallowCompositePipeline(nullptr)
     , m_sampler(nullptr)
@@ -404,9 +408,10 @@ bool VulkanCompositor::createPipelines()
 {
     const auto preprocessModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_preprocess.comp.qsb"));
     const auto compositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite.comp.qsb"));
+    const auto colorCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_color.comp.qsb"));
     const auto simpleCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_simple.comp.qsb"));
     const auto shallowCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_simple_2x2.comp.qsb"));
-    if (!preprocessModule || !compositeModule || !simpleCompositeModule || !shallowCompositeModule) {
+    if (!preprocessModule || !compositeModule || !colorCompositeModule || !simpleCompositeModule || !shallowCompositeModule) {
         return false;
     }
 
@@ -431,13 +436,15 @@ bool VulkanCompositor::createPipelines()
 
     auto preprocessPipeline = createPipeline(*preprocessModule);
     auto compositePipeline = createPipeline(*compositeModule);
+    auto colorCompositePipeline = createPipeline(*colorCompositeModule);
     auto simpleCompositePipeline = createPipeline(*simpleCompositeModule);
     auto shallowCompositePipeline = createPipeline(*shallowCompositeModule);
-    if (!preprocessPipeline || !compositePipeline || !simpleCompositePipeline || !shallowCompositePipeline) {
+    if (!preprocessPipeline || !compositePipeline || !colorCompositePipeline || !simpleCompositePipeline || !shallowCompositePipeline) {
         return false;
     }
     m_preprocessPipeline = std::move(*preprocessPipeline);
     m_compositePipeline = std::move(*compositePipeline);
+    m_colorCompositePipeline = std::move(*colorCompositePipeline);
     m_simpleCompositePipeline = std::move(*simpleCompositePipeline);
     m_shallowCompositePipeline = std::move(*shallowCompositePipeline);
     return true;
@@ -1001,8 +1008,19 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         } else if (layer.blendMode == VulkanBlendMode::Additive) {
             flags |= 1u << 7;
         }
+        const QColor modulation = layer.color.toRgb();
+        const bool hasTexture = layer.texture || layer.texturePlaneCount > 0;
+        const bool identityColorConversion = layer.colorDescription == targetColorDescription
+            && layer.colorFilter == VulkanColorFilter::None
+            && layer.brightness == 1.0
+            && layer.saturation == 1.0
+            && (!hasTexture
+                || (modulation.redF() == 1.0
+                    && modulation.greenF() == 1.0
+                    && modulation.blueF() == 1.0));
         const bool transformColor = layer.blendMode != VulkanBlendMode::DestinationOut
-            && layer.colorDescription && targetColorDescription;
+            && layer.colorDescription && targetColorDescription
+            && !identityColorConversion;
         if (transformColor) {
             flags |= 1u << 4;
         }
@@ -1033,6 +1051,15 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
             && !layer.auxiliaryTexture;
         if (simpleSourceOver) {
             flags |= 1u << 9;
+        }
+        const bool colorManagedSourceOver = axisAlignedFastPath
+            && layer.blendMode == VulkanBlendMode::SourceOver
+            && layer.colorFilter == VulkanColorFilter::None
+            && transformColor
+            && effectivePlaneCount <= 1
+            && !layer.auxiliaryTexture;
+        if (colorManagedSourceOver) {
+            flags |= 1u << 10;
         }
         GpuLayer &gpuLayer = gpuLayers[i];
         gpuLayer.colorFilterMatrixX = matrixRow(layer.colorFilterMatrix, 0);
@@ -1226,7 +1253,6 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                     0.0f,
                 };
             }
-            const QColor modulation = layer.color.toRgb();
             gpuLayer.color = {
                 float(modulation.redF()),
                 float(modulation.greenF()),
@@ -1272,6 +1298,10 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
     const bool useSimpleCompositePipeline = !applyOutputLut
         && std::ranges::all_of(gpuHotLayers, [](const GpuHotLayer &layer) {
         return (layer.metadata[2] & (1u << 9)) != 0u;
+    });
+    const bool useColorCompositePipeline = !applyOutputLut
+        && std::ranges::all_of(gpuHotLayers, [](const GpuHotLayer &layer) {
+        return (layer.metadata[2] & (1u << 10)) != 0u;
     });
     if (!layers.empty()) {
         if (!useSimpleCompositePipeline) {
@@ -1433,6 +1463,8 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                                                        vk::PipelineStageFlagBits2::eAllCommands);
     const vk::Pipeline compositePipeline = useSimpleCompositePipeline
         ? (layers.size() <= 2 ? *m_shallowCompositePipeline : *m_simpleCompositePipeline)
+        : useColorCompositePipeline
+        ? *m_colorCompositePipeline
         : *m_compositePipeline;
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, compositePipeline);
     for (uint32_t batchIndex = 0; batchIndex < batchCount; ++batchIndex) {
@@ -1546,6 +1578,7 @@ void VulkanCompositor::releaseResources()
     m_sampler.clear();
     m_preprocessPipeline.clear();
     m_compositePipeline.clear();
+    m_colorCompositePipeline.clear();
     m_simpleCompositePipeline.clear();
     m_shallowCompositePipeline.clear();
     m_pipelineLayout.clear();

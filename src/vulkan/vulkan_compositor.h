@@ -248,6 +248,7 @@ private:
     vk::raii::PipelineLayout m_pipelineLayout;
     vk::raii::Pipeline m_preprocessPipeline;
     vk::raii::Pipeline m_compositePipeline;
+    vk::raii::Pipeline m_colorCompositePipeline;
     vk::raii::Pipeline m_simpleCompositePipeline;
     vk::raii::Pipeline m_shallowCompositePipeline;
     vk::raii::Sampler m_sampler;

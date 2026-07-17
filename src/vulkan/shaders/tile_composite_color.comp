@@ -1,0 +1,292 @@
+#version 450
+#extension GL_EXT_shader_image_load_formatted : require
+
+// Focused source-over pipeline for axis-aligned RGBA and solid layers that
+// require color conversion. Keeping color management separate from geometry,
+// filters, YUV, and non-source-over blending limits live state and code size.
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+struct Layer
+{
+    vec4 rect;
+    vec4 color;
+    vec4 sourceRect;
+    vec4 localRect;
+    vec4 inverseTransformX;
+    vec4 inverseTransformY;
+    vec4 clipRect;
+    vec4 textureCoordinatesX;
+    vec4 textureCoordinatesY;
+    vec4 effects;
+    vec4 roundedRect;
+    vec4 cornerRadii;
+    vec4 colorTransformX;
+    vec4 colorTransformY;
+    vec4 colorTransformZ;
+    vec4 transferParameters;
+    vec4 colorParameters;
+    vec4 destinationToLmsX;
+    vec4 destinationToLmsY;
+    vec4 destinationToLmsZ;
+    vec4 lmsToDestinationX;
+    vec4 lmsToDestinationY;
+    vec4 lmsToDestinationZ;
+    vec4 toneMappingParameters;
+    vec4 yuvTransformX;
+    vec4 yuvTransformY;
+    vec4 yuvTransformZ;
+    vec4 quadPositionX;
+    vec4 quadPositionY;
+    vec4 quadTextureX;
+    vec4 quadTextureY;
+    vec4 colorFilterMatrixX;
+    vec4 colorFilterMatrixY;
+    vec4 colorFilterMatrixZ;
+    vec4 colorFilterParameters;
+    uvec4 textureIndices;
+    uvec4 metadata;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer LayerBuffer
+{
+    Layer layers[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer TileBuffer
+{
+    uint tileData[];
+};
+
+layout(set = 0, binding = 2) uniform image2D destination;
+layout(set = 0, binding = 3) uniform sampler2D textures[16];
+
+layout(std430, set = 0, binding = 4) readonly buffer DirtyTileBuffer
+{
+    uint dirtyTiles[];
+};
+
+layout(push_constant) uniform Parameters
+{
+    uint layerCount;
+    uint tilesWide;
+    uint flags;
+    uint dirtyTileCount;
+    vec4 background;
+    uint firstLayer;
+    uint lastLayer;
+    uvec2 padding;
+    vec4 outputLutParameters;
+} params;
+
+vec3 pqToLinear(vec3 pq)
+{
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    const float inverseM1 = 1.0 / 0.1593017578125;
+    const float inverseM2 = 1.0 / 78.84375;
+    vec3 powered = pow(clamp(pq, vec3(0.0), vec3(1.0)), vec3(inverseM2));
+    return pow(max(powered - c1, vec3(0.0)) / (c2 - c3 * powered), vec3(inverseM1));
+}
+
+vec3 linearToPq(vec3 linear)
+{
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    vec3 powered = pow(clamp(linear, vec3(0.0), vec3(1.0)), vec3(m1));
+    return pow((vec3(c1) + c2 * powered) / (vec3(1.0) + c3 * powered), vec3(m2));
+}
+
+float singlePqToLinear(float pq)
+{
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    const float inverseM1 = 1.0 / 0.1593017578125;
+    const float inverseM2 = 1.0 / 78.84375;
+    float powered = pow(clamp(pq, 0.0, 1.0), inverseM2);
+    return pow(max(powered - c1, 0.0) / (c2 - c3 * powered), inverseM1);
+}
+
+float singleLinearToPq(float linear)
+{
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    float powered = pow(clamp(linear, 0.0, 1.0), m1);
+    return pow((c1 + c2 * powered) / (1.0 + c3 * powered), m2);
+}
+
+const mat3 toICtCp = mat3(
+    0.5,  1.613769531250,   4.378173828125,
+    0.5, -3.323486328125,  -4.245605468750,
+    0.0,  1.709716796875,  -0.132568359375
+);
+const mat3 fromICtCp = mat3(
+    1.0,               1.0,              1.0,
+    0.00860903703793, -0.008609037037,   0.56031335710680,
+    0.11102962500303, -0.111029625003,  -0.32062717498732
+);
+
+vec3 doToneMapping(Layer layer, vec3 color)
+{
+    float maximumInput = layer.toneMappingParameters.x;
+    float maximumOutput = layer.colorParameters.w;
+    if (maximumInput < maximumOutput * 1.01) {
+        return clamp(color, vec3(0.0), vec3(maximumOutput));
+    }
+
+    vec4 destination = vec4(color, 1.0);
+    vec3 lms = vec3(dot(layer.destinationToLmsX, destination),
+                    dot(layer.destinationToLmsY, destination),
+                    dot(layer.destinationToLmsZ, destination));
+    vec3 ictcp = toICtCp * linearToPq(lms / 10000.0);
+    float luminance = singlePqToLinear(ictcp.r) * 10000.0;
+    float reference = layer.toneMappingParameters.y;
+    float relative = max(luminance / reference, 0.0);
+    float inputRange = maximumInput / reference;
+    float outputRange = maximumOutput / reference;
+    float v = (outputRange * (1.0 + inputRange) - inputRange) / (inputRange * inputRange);
+    relative = relative * (1.0 + relative * v) / (1.0 + relative);
+    ictcp.r = singleLinearToPq(relative * reference / 10000.0);
+
+    vec3 linearLms = pqToLinear(fromICtCp * ictcp);
+    vec4 transformedLms = vec4(linearLms, 1.0);
+    color = vec3(dot(layer.lmsToDestinationX, transformedLms),
+                 dot(layer.lmsToDestinationY, transformedLms),
+                 dot(layer.lmsToDestinationZ, transformedLms)) * 10000.0;
+    return clamp(color, vec3(0.0), vec3(maximumOutput));
+}
+
+vec3 srgbToLinear(vec3 color)
+{
+    bvec3 low = lessThanEqual(color, vec3(0.04045));
+    return mix(pow((color + 0.055) / 1.055, vec3(12.0 / 5.0)), color / 12.92, low);
+}
+
+vec3 linearToSrgb(vec3 color)
+{
+    bvec3 low = lessThanEqual(color, vec3(0.0031308));
+    return mix(pow(max(color, vec3(0.0)), vec3(5.0 / 12.0)) * 1.055 - 0.055, color * 12.92, low);
+}
+
+vec4 encodingToNits(vec4 color, uint transferFunction, float offset, float scale)
+{
+    if (transferFunction == 1u) {
+        color.rgb = color.rgb * scale + vec3(offset);
+        return color;
+    }
+    color.rgb /= max(color.a, 0.001);
+    if (transferFunction == 0u) {
+        color.rgb = srgbToLinear(color.rgb) * scale + vec3(offset);
+    } else if (transferFunction == 2u) {
+        color.rgb = pqToLinear(color.rgb) * scale + vec3(offset);
+    } else if (transferFunction == 3u) {
+        color.rgb = pow(max(color.rgb, vec3(0.0)), vec3(2.2)) * scale + vec3(offset);
+    } else {
+        color.rgb = scale * pow(max(color.rgb + vec3(offset), vec3(0.0)), vec3(2.4));
+    }
+    color.rgb *= color.a;
+    return color;
+}
+
+vec4 nitsToEncoding(vec4 color, uint transferFunction, float offset, float scale)
+{
+    if (transferFunction == 1u) {
+        color.rgb = (color.rgb - vec3(offset)) / scale;
+        return color;
+    }
+    color.rgb /= max(color.a, 0.001);
+    if (transferFunction == 0u) {
+        color.rgb = linearToSrgb((color.rgb - vec3(offset)) / scale);
+    } else if (transferFunction == 2u) {
+        color.rgb = linearToPq((color.rgb - vec3(offset)) / scale);
+    } else if (transferFunction == 3u) {
+        color.rgb = pow(max((color.rgb - vec3(offset)) / scale, vec3(0.0)), vec3(1.0 / 2.2));
+    } else {
+        color.rgb = pow(max(color.rgb / scale, vec3(0.0)), vec3(1.0 / 2.4)) - vec3(offset);
+    }
+    color.rgb *= color.a;
+    return color;
+}
+
+vec4 transformColor(Layer layer, vec4 source)
+{
+    uint sourceTransfer = layer.metadata.w & 0xffu;
+    uint destinationTransfer = (layer.metadata.w >> 8) & 0xffu;
+    source = encodingToNits(source, sourceTransfer, layer.transferParameters.x, layer.transferParameters.y);
+    vec4 nits = vec4(source.rgb, 1.0);
+    source.rgb = vec3(dot(layer.colorTransformX, nits),
+                      dot(layer.colorTransformY, nits),
+                      dot(layer.colorTransformZ, nits));
+    float luminance = dot(source.rgb, layer.colorParameters.xyz);
+    source.rgb = mix(vec3(luminance), source.rgb, layer.effects.y);
+    if (layer.metadata.x > 0u) {
+        source.rgb *= layer.color.rgb * layer.color.a;
+        source.a *= layer.color.a;
+    }
+    source.rgb *= layer.effects.x;
+    source.rgb = doToneMapping(layer, source.rgb);
+    return nitsToEncoding(source, destinationTransfer, layer.transferParameters.z, layer.transferParameters.w);
+}
+
+bool evaluateLayer(Layer layer, vec2 samplePosition, out vec4 source)
+{
+    if (samplePosition.x < layer.rect.x || samplePosition.x >= layer.rect.z
+            || samplePosition.y < layer.rect.y || samplePosition.y >= layer.rect.w) {
+        return false;
+    }
+    if (layer.metadata.x > 0u) {
+        vec3 outputPosition = vec3(samplePosition, 1.0);
+        vec2 coordinates = vec2(dot(layer.textureCoordinatesX.xyz, outputPosition),
+                                dot(layer.textureCoordinatesY.xyz, outputPosition));
+        source = texture(textures[layer.textureIndices.x], coordinates);
+    } else {
+        source = layer.color;
+    }
+    source = transformColor(layer, source);
+    return true;
+}
+
+void main()
+{
+    uint dirtyTileIndex = gl_WorkGroupID.x;
+    if (dirtyTileIndex >= params.dirtyTileCount) {
+        return;
+    }
+    uint packedTile = dirtyTiles[dirtyTileIndex];
+    uint tileX = packedTile & 0xffffu;
+    uint tileY = packedTile >> 16;
+    uint tileIndex = tileY * params.tilesWide + tileX;
+    ivec2 pixel = ivec2(tileX, tileY) * 16 + ivec2(gl_LocalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(destination)))) {
+        return;
+    }
+
+    uint listBase = tileIndex * (params.layerCount + 1u);
+    uint tileLayerCount = tileData[listBase];
+    vec2 samplePosition = vec2(pixel) + vec2(0.5);
+    vec4 background = (params.flags & (1u << 1)) != 0u
+        ? imageLoad(destination, pixel)
+        : params.background;
+    vec4 result = vec4(0.0);
+    float remaining = 1.0;
+    for (int i = int(tileLayerCount) - 1; i >= 0 && remaining > 0.0; --i) {
+        uint layerIndex = tileData[listBase + 1u + uint(i)];
+        if (layerIndex < params.firstLayer || layerIndex >= params.lastLayer) {
+            continue;
+        }
+        vec4 source;
+        if (!evaluateLayer(layers[layerIndex], samplePosition, source)) {
+            continue;
+        }
+        result += source * remaining;
+        remaining *= 1.0 - source.a;
+    }
+    imageStore(destination, pixel, result + background * remaining);
+}

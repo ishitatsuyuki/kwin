@@ -159,14 +159,19 @@ void VulkanCompositorBenchmark::benchmarkOverdraw()
 void VulkanCompositorBenchmark::benchmarkColorManagedOverdraw_data()
 {
     QTest::addColumn<int>("layerCount");
-    QTest::newRow("one-sdr-layer") << 1;
-    QTest::newRow("sixteen-sdr-layers") << 16;
-    QTest::newRow("sixty-four-sdr-layers") << 64;
+    QTest::addColumn<bool>("convertToP3");
+    QTest::newRow("one-same-space-layer") << 1 << false;
+    QTest::newRow("sixteen-same-space-layers") << 16 << false;
+    QTest::newRow("sixty-four-same-space-layers") << 64 << false;
+    QTest::newRow("one-srgb-to-p3-layer") << 1 << true;
+    QTest::newRow("sixteen-srgb-to-p3-layers") << 16 << true;
+    QTest::newRow("sixty-four-srgb-to-p3-layers") << 64 << true;
 }
 
 void VulkanCompositorBenchmark::benchmarkColorManagedOverdraw()
 {
     QFETCH(int, layerCount);
+    QFETCH(bool, convertToP3);
     auto compositor = VulkanCompositor::create(m_device);
     QVERIFY(compositor);
 
@@ -178,8 +183,11 @@ void VulkanCompositorBenchmark::benchmarkColorManagedOverdraw()
                                          VulkanQueueRole::Compute);
     QVERIFY(texture);
 
-    const auto colorDescription = std::make_shared<ColorDescription>(Colorimetry::BT709,
-                                                                     TransferFunction(TransferFunction::sRGB));
+    const auto sourceColor = std::make_shared<ColorDescription>(Colorimetry::BT709,
+                                                                TransferFunction(TransferFunction::sRGB));
+    const auto targetColor = convertToP3
+        ? std::make_shared<ColorDescription>(Colorimetry::DisplayP3, TransferFunction(TransferFunction::gamma22))
+        : sourceColor;
     QList<VulkanCompositorLayer> layers;
     layers.reserve(layerCount);
     for (int i = 0; i < layerCount; ++i) {
@@ -188,7 +196,7 @@ void VulkanCompositorBenchmark::benchmarkColorManagedOverdraw()
             .texture = texture.get(),
             .texturePlanes = {texture.get(), nullptr, nullptr},
             .texturePlaneCount = 1,
-            .colorDescription = colorDescription,
+            .colorDescription = sourceColor,
         });
     }
 
@@ -199,7 +207,7 @@ void VulkanCompositorBenchmark::benchmarkColorManagedOverdraw()
                                          layers,
                                          Qt::black,
                                          Region(0, 0, 1920, 1080),
-                                         colorDescription);
+                                         targetColor);
         QVERIFY(result);
         QVERIFY(result->completionFence.isValid());
         QVERIFY(waitForCompletion(result->completionFence));

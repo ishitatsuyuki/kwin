@@ -210,6 +210,30 @@ Experiments are preserved on `experiment/vulkan-*` branches. Results so far:
 - Neutral alone: direct UV precomposition; coverage kept the inverse-transform
   work live until the axis-aligned path was introduced.
 
+### Color-managed common paths (2026-07-17)
+
+The color-managed overdraw benchmark separately measures identical source and
+target descriptions and actual sRGB-to-Display-P3 conversion. Identical
+descriptions with neutral brightness, saturation, and textured RGB modulation
+are now treated as a semantic no-op. Color filters remain on the full path
+because they consume destination transfer metadata. A focused axis-aligned
+source-over pipeline handles conversions while preserving the full transfer,
+gamut conversion, linear effects, and tone-mapping equations.
+
+| 1920x1080 scene | General shader composite | Specialized composite | Change |
+| --- | ---: | ---: | ---: |
+| 1 same-space SDR layer | 0.226 ms | 0.058 ms | -74.2% |
+| 16 same-space SDR layers | 1.955 ms | 0.411 ms | -79.0% |
+| 64 same-space SDR layers | 7.800 ms | 1.555 ms | -80.1% |
+| 1 sRGB-to-P3 layer | 0.225 ms | 0.126 ms | -44.2% |
+| 16 sRGB-to-P3 layers | 1.867 ms | 1.584 ms | -15.2% |
+| 64 sRGB-to-P3 layers | 7.447 ms | 6.264 ms | -15.9% |
+
+The focused conversion shader reaches `v23`/`s79`, compared with
+`v83`/`s105` for the general shader. Remaining deep color-conversion time is
+mostly transfer-function work; approximations or encode-once linear
+composition require a separate accuracy and semantic evaluation.
+
 ## Planned optimization passes
 
 Hierarchical binning and prefix-summed tile compaction are intentionally
@@ -230,7 +254,7 @@ deferred until profiling demonstrates that their complexity is justified.
 - [ ] Prefix-sum tile-list construction (deferred)
 - [x] Texture descriptor batching without a fixed per-scene texture limit
 - [ ] Texture descriptor indexing/bindless sampling
-- [ ] Simple source-over pipeline variant with color management
+- [x] Simple source-over pipeline variant with color management
 - [ ] Move target-global color data out of full per-layer records
 - [ ] Replace the duplicated full-record fallback with a true cold-only buffer
 - [ ] Pipeline and descriptor reuse across outputs
