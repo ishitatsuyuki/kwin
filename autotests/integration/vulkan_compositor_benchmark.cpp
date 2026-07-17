@@ -52,6 +52,8 @@ private Q_SLOTS:
     void initTestCase();
     void benchmarkOverdraw_data();
     void benchmarkOverdraw();
+    void benchmarkColorManagedOverdraw_data();
+    void benchmarkColorManagedOverdraw();
     void benchmarkOpenGLOverdraw_data();
     void benchmarkOpenGLOverdraw();
     void benchmarkComputeLatencyUnderGraphicsContention_data();
@@ -150,6 +152,67 @@ void VulkanCompositorBenchmark::benchmarkOverdraw()
         }
     }
     qInfo().nospace() << "Vulkan compute GPU timestamps: preprocess=" << preprocessDuration.count()
+                      << "ns composite=" << compositeDuration.count()
+                      << "ns total=" << (preprocessDuration + compositeDuration).count() << "ns";
+}
+
+void VulkanCompositorBenchmark::benchmarkColorManagedOverdraw_data()
+{
+    QTest::addColumn<int>("layerCount");
+    QTest::newRow("one-sdr-layer") << 1;
+    QTest::newRow("sixteen-sdr-layers") << 16;
+    QTest::newRow("sixty-four-sdr-layers") << 64;
+}
+
+void VulkanCompositorBenchmark::benchmarkColorManagedOverdraw()
+{
+    QFETCH(int, layerCount);
+    auto compositor = VulkanCompositor::create(m_device);
+    QVERIFY(compositor);
+
+    QImage source(1, 1, QImage::Format_RGBA8888_Premultiplied);
+    source.fill(QColor::fromRgbF(0.4, 0.2, 0.1, 0.08));
+    auto texture = VulkanTexture::upload(m_device,
+                                         source,
+                                         vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                         VulkanQueueRole::Compute);
+    QVERIFY(texture);
+
+    const auto colorDescription = std::make_shared<ColorDescription>(Colorimetry::BT709,
+                                                                     TransferFunction(TransferFunction::sRGB));
+    QList<VulkanCompositorLayer> layers;
+    layers.reserve(layerCount);
+    for (int i = 0; i < layerCount; ++i) {
+        layers.append(VulkanCompositorLayer{
+            .rect = QRectF(0, 0, 1920, 1080),
+            .texture = texture.get(),
+            .texturePlanes = {texture.get(), nullptr, nullptr},
+            .texturePlaneCount = 1,
+            .colorDescription = colorDescription,
+        });
+    }
+
+    std::chrono::nanoseconds preprocessDuration;
+    std::chrono::nanoseconds compositeDuration;
+    QBENCHMARK {
+        auto result = compositor->render(QSize(1920, 1080),
+                                         layers,
+                                         Qt::black,
+                                         Region(0, 0, 1920, 1080),
+                                         colorDescription);
+        QVERIFY(result);
+        QVERIFY(result->completionFence.isValid());
+        QVERIFY(waitForCompletion(result->completionFence));
+        if (result->preprocessTime && result->compositeTime) {
+            const auto preprocess = result->preprocessTime->gpuDuration();
+            const auto composite = result->compositeTime->gpuDuration();
+            QVERIFY(preprocess.has_value());
+            QVERIFY(composite.has_value());
+            preprocessDuration = *preprocess;
+            compositeDuration = *composite;
+        }
+    }
+    qInfo().nospace() << "Vulkan color-managed GPU timestamps: preprocess=" << preprocessDuration.count()
                       << "ns composite=" << compositeDuration.count()
                       << "ns total=" << (preprocessDuration + compositeDuration).count() << "ns";
 }
