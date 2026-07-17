@@ -998,7 +998,7 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::render(const QSize
     if (!m_device || !ensureTarget(size)) {
         return std::nullopt;
     }
-    return renderTo(m_texture.get(), layers, background, damage, targetChanged, std::move(acquireFence), targetColorDescription, outputColorPipeline, uploadManager);
+    return renderTo(m_texture.get(), layers, background, damage, targetChanged, std::move(acquireFence), targetColorDescription, outputColorPipeline, uploadManager, Timing::Enabled);
 }
 
 std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTexture *target,
@@ -1010,7 +1010,20 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                                                                        const ColorPipeline *outputColorPipeline,
                                                                        VulkanUploadManager *uploadManager)
 {
-    return renderTo(target, layers, background, damage, false, std::move(acquireFence), targetColorDescription, outputColorPipeline, uploadManager);
+    return renderTo(target, layers, background, damage, false, std::move(acquireFence), targetColorDescription, outputColorPipeline, uploadManager, Timing::Enabled);
+}
+
+std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTexture *target,
+                                                                       std::span<const VulkanCompositorLayer> layers,
+                                                                       const QColor &background,
+                                                                       const Region &damage,
+                                                                       FileDescriptor &&acquireFence,
+                                                                       const std::shared_ptr<ColorDescription> &targetColorDescription,
+                                                                       const ColorPipeline *outputColorPipeline,
+                                                                       VulkanUploadManager *uploadManager,
+                                                                       Timing timing)
+{
+    return renderTo(target, layers, background, damage, false, std::move(acquireFence), targetColorDescription, outputColorPipeline, uploadManager, timing);
 }
 
 std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTexture *target,
@@ -1021,7 +1034,8 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                                                                        FileDescriptor &&acquireFence,
                                                                        const std::shared_ptr<ColorDescription> &targetColorDescription,
                                                                        const ColorPipeline *outputColorPipeline,
-                                                                       VulkanUploadManager *uploadManager)
+                                                                       VulkanUploadManager *uploadManager,
+                                                                       Timing timing)
 {
     if (!m_device || !target || layers.size() > std::numeric_limits<uint32_t>::max()) {
         return std::nullopt;
@@ -1534,10 +1548,12 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
     const std::array hostBarriers{hostBarrier, hotLayerHostBarrier, dirtyTileHostBarrier, outputLutHostBarrier};
     commandBuffer.pipelineBarrier2(vk::DependencyInfo{{}, {}, hostBarriers, inputAcquireBarriers});
 
-    auto preprocessQuery = VulkanRenderTimeQuery::begin(m_device,
-                                                        commandBuffer,
-                                                        m_device->computeQueueFamily(),
-                                                        vk::PipelineStageFlagBits2::eAllCommands);
+    auto preprocessQuery = timing == Timing::Enabled
+        ? VulkanRenderTimeQuery::begin(m_device,
+                                       commandBuffer,
+                                       m_device->computeQueueFamily(),
+                                       vk::PipelineStageFlagBits2::eAllCommands)
+        : nullptr;
     commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, m_pipelineLayout, 0, *m_currentFrame->descriptorSets.front(), {});
     commandBuffer.pushConstants(m_pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushConstants), &pushConstants);
     constexpr uint32_t PrefixScanLayerThreshold = 32;
@@ -1608,10 +1624,12 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         preprocessQuery->end(commandBuffer);
     }
 
-    auto compositeQuery = VulkanRenderTimeQuery::begin(m_device,
-                                                       commandBuffer,
-                                                       m_device->computeQueueFamily(),
-                                                       vk::PipelineStageFlagBits2::eAllCommands);
+    auto compositeQuery = timing == Timing::Enabled
+        ? VulkanRenderTimeQuery::begin(m_device,
+                                       commandBuffer,
+                                       m_device->computeQueueFamily(),
+                                       vk::PipelineStageFlagBits2::eAllCommands)
+        : nullptr;
     const vk::Pipeline compositePipeline = useSimpleCompositePipeline
         ? (layers.size() <= 2 ? *m_shallowCompositePipeline : *m_simpleCompositePipeline)
         : useColorCompositePipeline

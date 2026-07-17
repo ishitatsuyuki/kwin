@@ -59,6 +59,7 @@ private Q_SLOTS:
     void testComputeQueue();
     void testSwapchainBufferAge();
     void testTimestampQueryWait();
+    void testTimestampQueriesDisabled();
     void testComputeSolidScenes_data();
     void testComputeSolidScenes();
     void testComputeTexturedLayers();
@@ -489,6 +490,38 @@ void VulkanTest::testTimestampQueryWait()
     QVERIFY(composite.has_value());
     QVERIFY(*preprocess > std::chrono::nanoseconds::zero());
     QVERIFY(*composite > std::chrono::nanoseconds::zero());
+}
+
+void VulkanTest::testTimestampQueriesDisabled()
+{
+    auto compositor = VulkanCompositor::create(m_device);
+    QVERIFY(compositor);
+    auto target = VulkanTexture::allocate(m_device,
+                                          vk::Format::eR8G8B8A8Unorm,
+                                          QSize(64, 64),
+                                          vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+                                          VulkanQueueRole::Compute);
+    QVERIFY(target);
+
+    const QList<VulkanCompositorLayer> layers{{
+        .rect = QRectF(0, 0, 64, 64),
+        .color = QColor(30, 90, 180, 255),
+        .colorDescription = nullptr,
+    }};
+    auto result = compositor->renderTo(target.get(),
+                                       layers,
+                                       Qt::black,
+                                       Region(0, 0, 64, 64),
+                                       {},
+                                       nullptr,
+                                       nullptr,
+                                       nullptr,
+                                       VulkanCompositor::Timing::Disabled);
+    QVERIFY(result);
+    QVERIFY(result->completionFence.isValid());
+    QVERIFY(!result->preprocessTime);
+    QVERIFY(!result->compositeTime);
+    m_device->waitComputeIdle();
 }
 
 void VulkanTest::testComputeSolidScenes_data()

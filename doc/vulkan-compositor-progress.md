@@ -469,6 +469,25 @@ build/bin/vulkanCompositorBenchmark -median 5 \
     benchmarkUploadUpdate benchmarkDeferredUploadCpu
 ```
 
+## Resolved performance bug: blur passes allocated unused timestamp pools
+
+Every `VulkanCompositor::renderTo()` previously created separate two-slot
+timestamp query pools for preprocessing and composition. Ordered dual-Kawase
+blur invokes the compositor once for scene capture, for every downsample and
+upsample level, for blur combination, and once more for final composition. The
+intermediate results were retained until their triple-buffered blur-frame fence
+signaled solely to keep those query pools alive, but their timestamps were
+never read or forwarded to the output frame.
+
+Compositor timing is now explicitly selectable. Intermediate blur submissions
+disable it and can discard their result objects immediately; final output and
+benchmark submissions retain the existing preprocessing and composition
+queries. With the default four blur iterations and one blurred window, this
+reduces query-pool creation from 20 pools to 2 per rendered frame. The Vulkan
+regression suite covers both timing-enabled waits and timing-disabled results,
+and the validation-enabled backdrop-blur regression covers the intermediate
+submission and scratch-resource lifetimes.
+
 ## Planned optimization passes
 
 Compact variable-length tile lists remain deferred; summarized fixed-width

@@ -155,6 +155,12 @@ struct KWIN_EXPORT VulkanCompositorRenderResult
 class KWIN_EXPORT VulkanCompositor : public QObject
 {
 public:
+    /** Controls whether a render result includes preprocessing and composition timestamp queries. */
+    enum class Timing {
+        Enabled,
+        Disabled,
+    };
+
     static constexpr uint32_t TileSize = 16;
     /** Maximum number of distinct sampled images in one descriptor batch. */
     static constexpr uint32_t MaximumTextureCount = 16;
@@ -188,6 +194,15 @@ public:
                                                          const std::shared_ptr<ColorDescription> &targetColorDescription = nullptr,
                                                          const ColorPipeline *outputColorPipeline = nullptr,
                                                          VulkanUploadManager *uploadManager = nullptr);
+    std::optional<VulkanCompositorRenderResult> renderTo(VulkanTexture *target,
+                                                         std::span<const VulkanCompositorLayer> layers,
+                                                         const QColor &background,
+                                                         const Region &damage,
+                                                         FileDescriptor &&acquireFence,
+                                                         const std::shared_ptr<ColorDescription> &targetColorDescription,
+                                                         const ColorPipeline *outputColorPipeline,
+                                                         VulkanUploadManager *uploadManager,
+                                                         Timing timing);
 
     VulkanTexture *texture() const;
     QSize size() const;
@@ -246,7 +261,8 @@ private:
                                                          FileDescriptor &&acquireFence,
                                                          const std::shared_ptr<ColorDescription> &targetColorDescription,
                                                          const ColorPipeline *outputColorPipeline,
-                                                         VulkanUploadManager *uploadManager);
+                                                         VulkanUploadManager *uploadManager,
+                                                         Timing timing);
     bool updateTextureDescriptors(std::span<const TextureBatch> batches,
                                   std::vector<vk::ImageMemoryBarrier2> &acquireBarriers,
                                   std::vector<vk::ImageMemoryBarrier2> &releaseBarriers);

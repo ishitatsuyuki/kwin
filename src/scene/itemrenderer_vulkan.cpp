@@ -517,7 +517,6 @@ ItemRendererVulkan::BlurFrameResources *ItemRendererVulkan::acquireBlurFrame(uin
         BlurFrameResources &frame = m_blurFrames[index];
         if (!frame.completionFence.isValid() || frame.completionFence.isReadable()) {
             frame.completionFence = FileDescriptor{};
-            frame.renderResults.clear();
             if (!ensureBlurFrameResources(frame, maximumIterationCount)) {
                 return nullptr;
             }
@@ -531,7 +530,6 @@ ItemRendererVulkan::BlurFrameResources *ItemRendererVulkan::acquireBlurFrame(uin
     m_device->waitComputeIdle();
     for (BlurFrameResources &frame : m_blurFrames) {
         frame.completionFence = FileDescriptor{};
-        frame.renderResults.clear();
     }
     BlurFrameResources &frame = m_blurFrames[m_nextBlurFrame];
     m_nextBlurFrame = (m_nextBlurFrame + 1) % m_blurFrames.size();
@@ -598,16 +596,26 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
         }
     };
     FileDescriptor pendingAcquireFence = takeAcquireFence();
-    const auto submit = [this, &frame, &pendingAcquireFence](VulkanCompositor *compositor,
-                                                             VulkanTexture *target,
-                                                             const QList<VulkanCompositorLayer> &layers,
-                                                             const Region &damage,
-                                                             const std::shared_ptr<ColorDescription> &colorDescription) {
-        auto result = compositor->renderTo(target, layers, Qt::transparent, damage, std::move(pendingAcquireFence), colorDescription, nullptr, m_uploadManager.get());
+    // Intermediate passes are ordered on the compute queue and scratch reuse is
+    // gated by the final fence. Their results are otherwise discarded, so do
+    // not allocate timestamp query pools that no consumer will read.
+    const auto submit = [this, &pendingAcquireFence](VulkanCompositor *compositor,
+                                                     VulkanTexture *target,
+                                                     const QList<VulkanCompositorLayer> &layers,
+                                                     const Region &damage,
+                                                     const std::shared_ptr<ColorDescription> &colorDescription) {
+        auto result = compositor->renderTo(target,
+                                           layers,
+                                           Qt::transparent,
+                                           damage,
+                                           std::move(pendingAcquireFence),
+                                           colorDescription,
+                                           nullptr,
+                                           m_uploadManager.get(),
+                                           VulkanCompositor::Timing::Disabled);
         if (!result) {
             return false;
         }
-        frame.renderResults.push_back(std::move(*result));
         return true;
     };
 

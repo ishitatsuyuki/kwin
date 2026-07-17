@@ -142,7 +142,6 @@ private:
         std::vector<std::unique_ptr<VulkanTexture>> levels;
         std::unique_ptr<VulkanCompositor> fullSizeCompositor;
         std::vector<std::unique_ptr<VulkanCompositor>> levelCompositors;
-        std::vector<VulkanCompositorRenderResult> renderResults;
         FileDescriptor completionFence;
         QSize size;
     };
