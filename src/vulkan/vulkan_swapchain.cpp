@@ -120,7 +120,7 @@ std::shared_ptr<VulkanSwapchainSlot> VulkanSwapchain::acquire()
     return slot;
 }
 
-void VulkanSwapchain::release(VulkanSwapchainSlot *released, FileDescriptor &&releaseFd)
+void VulkanSwapchain::releaseRendered(VulkanSwapchainSlot *released, FileDescriptor &&releaseFd)
 {
     released->m_releasePoint->addReleaseFence(releaseFd);
     for (const auto &slot : m_slots) {

@@ -185,13 +185,13 @@ bool DrmVulkanLayer::doEndFrame(const Region &renderedDeviceRegion, const Region
                                                          completionFence.duplicate(),
                                                          frame,
                                                          m_current->releasePoint());
-        m_swapchain->release(m_current.get(), std::move(completionFence));
+        m_swapchain->releaseRendered(m_current.get(), std::move(completionFence));
         if (imported) {
             m_currentFramebuffer = m_gpu->importBuffer(imported->buffer, std::move(imported->sync));
         }
     } else {
         m_currentFramebuffer = m_gpu->importBuffer(m_current->buffer(), completionFence.duplicate());
-        m_swapchain->release(m_current.get(), std::move(completionFence));
+        m_swapchain->releaseRendered(m_current.get(), std::move(completionFence));
     }
     if (!m_currentFramebuffer) {
         return false;
@@ -219,10 +219,17 @@ bool DrmVulkanLayer::preparePresentationTest()
         if (imported) {
             m_currentFramebuffer = m_gpu->importBuffer(imported->buffer, std::move(imported->sync));
         }
+        // The copied test buffer contains no frame tracked by the damage
+        // journal. Keep it from affecting the next real partial copy.
+        m_importSwapchain->resetDamageTracking();
     } else {
         m_currentFramebuffer = m_gpu->importBuffer(m_current->buffer(), FileDescriptor{});
     }
-    m_swapchain->release(m_current.get(), FileDescriptor{});
+    // This only imports the current contents for an atomic test; it does not
+    // render a frame. Calling VulkanSwapchain::releaseRendered() here would mark an
+    // untouched slot as age 1 and advance every other slot without adding a
+    // corresponding damage-journal entry. A later partial repaint could then
+    // treat arbitrarily old (or uninitialized) contents as current.
     return bool(m_currentFramebuffer);
 }
 
@@ -356,7 +363,7 @@ bool DrmVirtualVulkanLayer::doEndFrame(const Region &renderedDeviceRegion, const
     if (!completionFence.isValid()) {
         return false;
     }
-    m_swapchain->release(m_current.get(), std::move(completionFence));
+    m_swapchain->releaseRendered(m_current.get(), std::move(completionFence));
     m_damageJournal.add(damagedDeviceRegion);
     m_target.reset();
     return true;

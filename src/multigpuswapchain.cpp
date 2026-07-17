@@ -320,7 +320,7 @@ std::optional<MultiGpuSwapchain::Ret> MultiGpuSwapchain::copyWithVulkan(Graphics
     if (releasePoint) {
         releasePoint->addReleaseFence(*completionFd);
     }
-    m_vulkanSwapchain->release(m_currentVulkanSlot.get(), completionFd->duplicate());
+    m_vulkanSwapchain->releaseRendered(m_currentVulkanSlot.get(), completionFd->duplicate());
     return Ret{
         .buffer = m_currentVulkanSlot->buffer(),
         .sync = std::move(*completionFd),

@@ -60,7 +60,12 @@ public:
     uint64_t modifier() const;
 
     std::shared_ptr<VulkanSwapchainSlot> acquire();
-    void release(VulkanSwapchainSlot *slot, FileDescriptor &&releaseFd);
+    /**
+     * Records a completed render into @a slot and advances buffer ages.
+     * Do not call this for presentation tests or other operations that leave
+     * the slot contents unchanged.
+     */
+    void releaseRendered(VulkanSwapchainSlot *slot, FileDescriptor &&releaseFd);
 
     void resetBufferAge();
 

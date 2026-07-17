@@ -81,7 +81,7 @@ bool VirtualVulkanLayer::doEndFrame(const Region &renderedDeviceRegion, const Re
         m_damageJournal.clear();
         return false;
     }
-    m_swapchain->release(m_current.get(), std::move(completionFence));
+    m_swapchain->releaseRendered(m_current.get(), std::move(completionFence));
     m_damageJournal.add(damagedDeviceRegion);
     m_target.reset();
     return true;

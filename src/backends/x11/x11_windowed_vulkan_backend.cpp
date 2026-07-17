@@ -88,7 +88,7 @@ bool X11WindowedVulkanPrimaryLayer::doEndFrame(const Region &renderedDeviceRegio
         return false;
     }
     m_output->setPrimaryBuffer(m_buffer->buffer(), completionFence.duplicate());
-    m_swapchain->release(m_buffer.get(), std::move(completionFence));
+    m_swapchain->releaseRendered(m_buffer.get(), std::move(completionFence));
     m_damageJournal.add(damagedDeviceRegion);
     m_target.reset();
     return true;

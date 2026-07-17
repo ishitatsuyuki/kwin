@@ -7,7 +7,9 @@
 #include "kwin_wayland_test.h"
 
 #include "core/colorpipeline.h"
+#include "core/drmdevice.h"
 #include "core/gpumanager.h"
+#include "core/graphicsbuffer.h"
 #include "core/iccprofile.h"
 #include "core/renderdevice.h"
 #include "core/rendertarget.h"
@@ -31,11 +33,14 @@
 #include "vulkan/vulkan_device.h"
 #include "vulkan/vulkan_render_time_query.h"
 #include "vulkan/vulkan_rendertarget.h"
+#include "vulkan/vulkan_swapchain.h"
 #include "vulkan/vulkan_texture.h"
 #include "wayland_server.h"
 
 #include <QPainter>
 #include <QPainterPath>
+
+#include <drm_fourcc.h>
 
 namespace KWin
 {
@@ -50,6 +55,7 @@ private Q_SLOTS:
     void testUpdateRegion();
     void testUpdateCorners();
     void testComputeQueue();
+    void testSwapchainBufferAge();
     void testTimestampQueryWait();
     void testComputeSolidScenes_data();
     void testComputeSolidScenes();
@@ -315,6 +321,50 @@ void VulkanTest::testComputeQueue()
     }
 }
 
+void VulkanTest::testSwapchainBufferAge()
+{
+    const ModifierList modifiers = m_device->computeOutputFormats().value(DRM_FORMAT_ABGR8888);
+    if (modifiers.isEmpty()) {
+        QSKIP("No Vulkan ABGR8888 output format available");
+    }
+    auto swapchain = VulkanSwapchain::create(m_device,
+                                             m_renderDevice->drmDevice()->allocator(),
+                                             QSize(64, 64),
+                                             DRM_FORMAT_ABGR8888,
+                                             modifiers,
+                                             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    QVERIFY(swapchain);
+
+    auto first = swapchain->acquire();
+    QVERIFY(first);
+    VulkanSwapchainSlot *const firstPointer = first.get();
+    QCOMPARE(first->age(), 0);
+
+    // Importing a slot for a presentation test leaves its contents and age
+    // unchanged. Once the temporary framebuffer reference is gone, acquiring
+    // the slot again must still require a full repaint.
+    GraphicsBufferRef testFramebuffer(first->buffer());
+    first.reset();
+    testFramebuffer.reset();
+    first = swapchain->acquire();
+    QCOMPARE(first.get(), firstPointer);
+    QCOMPARE(first->age(), 0);
+
+    swapchain->releaseRendered(first.get(), FileDescriptor{});
+    QCOMPARE(first->age(), 1);
+
+    // Hold the first rendered slot as if it were scanned out, then render a
+    // second slot. Only actual renders advance the age sequence.
+    GraphicsBufferRef scanout(first->buffer());
+    auto second = swapchain->acquire();
+    QVERIFY(second);
+    QVERIFY(second.get() != first.get());
+    QCOMPARE(second->age(), 0);
+    swapchain->releaseRendered(second.get(), FileDescriptor{});
+    QCOMPARE(second->age(), 1);
+    QCOMPARE(first->age(), 2);
+}
+
 void VulkanTest::testTimestampQueryWait()
 {
     if (!m_device->hasHostQueryReset()) {
@@ -383,6 +433,18 @@ void VulkanTest::testComputeSolidScenes_data()
         << QSize(23, 21)
         << QColor(5, 9, 13, 255)
         << manyLayers;
+
+    QList<VulkanSolidLayer> multiBinLayers;
+    for (int i = 0; i < 33; ++i) {
+        multiBinLayers.append({QRectF((i * 37) % 520, (i * 53) % 360, 19, 23), QColor(0, 0, 0, 0)});
+    }
+    multiBinLayers.append({QRectF(7, 11, 511, 351), QColor(41, 83, 137, 255)});
+    multiBinLayers.append({QRectF(219, 143, 297, 219), QColor(227, 61, 43, 176)});
+    multiBinLayers.append({QRectF(483, 5, 47, 373), QColor(29, 211, 109, 208)});
+    QTest::newRow("prefix-multiple-2d-bins")
+        << QSize(541, 389)
+        << QColor(3, 7, 13, 255)
+        << multiBinLayers;
 }
 
 void VulkanTest::testComputeSolidScenes()

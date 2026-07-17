@@ -56,6 +56,7 @@ test unless the item explicitly says otherwise.
 - [x] Multi-GPU presentation through the existing fenced GPU-copy swapchain (compiled; multi-GPU run still needed)
 - [x] Source buffer release points and output completion fences
 - [x] Tile-aligned Vulkan repaint expansion before scene occlusion/layer collection (partial-damage move regression plus fractional-scale and all-output-transform coverage)
+- [x] DRM presentation tests preserve Vulkan swapchain ages and multi-GPU copy damage history instead of aging untouched test buffers
 - [x] Wayland explicit host synchronization protocol (`linux-drm-syncobj-v1` acquire fences and per-commit release timelines for output and hardware-cursor dma-bufs; live host protocol trace under Vulkan validation)
 - [x] Screenshot and screencast paths (output, region, and window capture; PipeWire memfd and directly rendered dma-buf buffers with syncobj fences)
 - [x] Embedded and metadata cursor capture paths
@@ -329,6 +330,25 @@ the scalable path only where it wins. `RADV_DEBUG=nocache,shaders` dumps were
 also checked; no new scratch spills appeared in the three preprocessing
 kernels.
 
+## Resolved bug: DRM presentation tests corrupted buffer age
+
+Observed on 2026-07-17 as 16x16 black regions and flickering between the current
+desktop and surfaces from much older frames. The corruption was specific to the
+physical DRM path and looked like missing damage repair.
+
+`DrmVulkanLayer::preparePresentationTest()` acquired a Vulkan swapchain slot,
+imported it for an atomic test, and called the same release operation used after
+a completed render. That marked the untouched test slot as age 1 and advanced
+all other slots, but no frame or matching entry was added to the damage journal.
+The next partial render could therefore acquire old or uninitialized contents
+with a falsely recent age and omit the repair needed to bring them current.
+
+Presentation tests now leave render-slot ages unchanged, and the rendered-frame
+operation is named `releaseRendered()` to make that invariant explicit. The
+multi-GPU copy journal is reset after copying a test buffer for the same reason.
+The regression covers untouched presentation-test imports, real rendered age
+advancement, and a second slot held as if scanned out.
+
 ## Planned optimization passes
 
 Compact variable-length tile lists remain deferred; summarized fixed-width
@@ -380,5 +400,5 @@ bridge asynchronous; implementations without them fall back to blocking sync-fd
 waits and `glFinish()` for correctness. Native in-tree effects continue to use
 compute filters and do not pay the cross-API cost. The validation integration test uses an orientation-sensitive
 two-color window and installs a custom channel-swapping shader after snapshot
-capture. The current full runs pass 42 compositor tests and 15 live integration
+capture. The current full runs pass 44 compositor tests and 16 live integration
 tests with no validation messages or current-boot kernel GPU-reset report.
