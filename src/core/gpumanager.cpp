@@ -9,6 +9,7 @@
 #include "gpumanager.h"
 #include "drmdevice.h"
 #include "opengl/egldisplay.h"
+#include "renderdevice.h"
 #include "utils/common.h"
 #include "utils/envvar.h"
 #include "utils/udev.h"

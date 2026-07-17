@@ -14,6 +14,7 @@
 
 class KConfigLoader;
 class KConfigPropertyMap;
+class KPluginMetaData;
 
 namespace KWin
 {

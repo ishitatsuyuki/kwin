@@ -32,6 +32,7 @@ class Transaction;
 class SyncReleasePoint;
 class RawSurfaceAttachedState;
 class RawSurfaceExtension;
+class RegionF;
 
 enum class ColorDescriptionType {
     Normal,

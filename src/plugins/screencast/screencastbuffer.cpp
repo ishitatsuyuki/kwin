@@ -7,9 +7,14 @@
 #include "screencastbuffer.h"
 #include "compositor.h"
 #include "core/drmdevice.h"
+#include "core/renderbackend.h"
 #include "core/shmgraphicsbufferallocator.h"
 #include "opengl/eglbackend.h"
 #include "opengl/glframebuffer.h"
+#include "vulkan/vulkan_backend.h"
+#include "vulkan/vulkan_device.h"
+#include "vulkan/vulkan_rendertarget.h"
+#include "vulkan/vulkan_texture.h"
 
 namespace KWin
 {
@@ -24,22 +29,31 @@ ScreenCastBuffer::~ScreenCastBuffer()
     m_buffer->drop();
 }
 
-DmaBufScreenCastBuffer::DmaBufScreenCastBuffer(GraphicsBuffer *buffer, std::shared_ptr<GLTexture> &&texture, std::unique_ptr<GLFramebuffer> &&framebuffer, std::unique_ptr<SyncTimeline> &&synctimeline)
+DmaBufScreenCastBuffer::DmaBufScreenCastBuffer(GraphicsBuffer *buffer,
+                                               std::shared_ptr<GLTexture> &&texture,
+                                               std::unique_ptr<GLFramebuffer> &&framebuffer,
+                                               std::shared_ptr<VulkanTexture> &&vulkanTexture,
+                                               std::unique_ptr<VulkanRenderTarget> &&vulkanTarget,
+                                               std::unique_ptr<SyncTimeline> &&synctimeline)
     : ScreenCastBuffer(buffer)
     , texture(std::move(texture))
     , framebuffer(std::move(framebuffer))
+    , vulkanTexture(std::move(vulkanTexture))
+    , vulkanTarget(std::move(vulkanTarget))
     , synctimeline(std::move(synctimeline))
 {
 }
 
+DmaBufScreenCastBuffer::~DmaBufScreenCastBuffer() = default;
+
 DmaBufScreenCastBuffer *DmaBufScreenCastBuffer::create(pw_buffer *pwBuffer, const GraphicsBufferOptions &options)
 {
-    EglBackend *backend = dynamic_cast<EglBackend *>(Compositor::self()->backend());
-    if (!backend || !backend->drmDevice()) {
+    RenderBackend *renderBackend = Compositor::self()->backend();
+    if (!renderBackend->drmDevice()) {
         return nullptr;
     }
 
-    GraphicsBuffer *buffer = backend->drmDevice()->allocator()->allocate(options);
+    GraphicsBuffer *buffer = renderBackend->drmDevice()->allocator()->allocate(options);
     if (!buffer) {
         return nullptr;
     }
@@ -56,16 +70,30 @@ DmaBufScreenCastBuffer *DmaBufScreenCastBuffer::create(pw_buffer *pwBuffer, cons
         return nullptr;
     }
 
-    backend->openglContext()->makeCurrent();
-
-    auto texture = backend->importDmaBufAsTexture(*attrs);
-    if (!texture) {
-        buffer->drop();
-        return nullptr;
-    }
-
-    auto framebuffer = std::make_unique<GLFramebuffer>(texture.get());
-    if (!framebuffer->valid()) {
+    std::shared_ptr<GLTexture> texture;
+    std::unique_ptr<GLFramebuffer> framebuffer;
+    std::shared_ptr<VulkanTexture> vulkanTexture;
+    std::unique_ptr<VulkanRenderTarget> vulkanTarget;
+    if (const auto eglBackend = dynamic_cast<EglBackend *>(renderBackend)) {
+        eglBackend->openglContext()->makeCurrent();
+        texture = eglBackend->importDmaBufAsTexture(*attrs);
+        if (texture) {
+            framebuffer = std::make_unique<GLFramebuffer>(texture.get());
+        }
+        if (!framebuffer || !framebuffer->valid()) {
+            buffer->drop();
+            return nullptr;
+        }
+    } else if (const auto vulkanBackend = dynamic_cast<VulkanBackend *>(renderBackend)) {
+        vulkanTexture = vulkanBackend->device()->importBuffer(buffer,
+                                                              VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                                                                  | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        if (!vulkanTexture) {
+            buffer->drop();
+            return nullptr;
+        }
+        vulkanTarget = std::make_unique<VulkanRenderTarget>(vulkanTexture.get());
+    } else {
         buffer->drop();
         return nullptr;
     }
@@ -86,7 +114,7 @@ DmaBufScreenCastBuffer *DmaBufScreenCastBuffer::create(pw_buffer *pwBuffer, cons
 
     std::unique_ptr<SyncTimeline> synctimeline;
     if (syncTimelineMeta) {
-        synctimeline = std::make_unique<SyncTimeline>(backend->drmDevice()->fileDescriptor());
+        synctimeline = std::make_unique<SyncTimeline>(renderBackend->drmDevice()->fileDescriptor());
         const FileDescriptor &syncobjfd = synctimeline->fileDescriptor();
         if (!syncobjfd.isValid()) {
             buffer->drop();
@@ -107,7 +135,12 @@ DmaBufScreenCastBuffer *DmaBufScreenCastBuffer::create(pw_buffer *pwBuffer, cons
         releaseData.fd = syncobjfd.get();
     }
 
-    return new DmaBufScreenCastBuffer(buffer, std::move(texture), std::move(framebuffer), std::move(synctimeline));
+    return new DmaBufScreenCastBuffer(buffer,
+                                      std::move(texture),
+                                      std::move(framebuffer),
+                                      std::move(vulkanTexture),
+                                      std::move(vulkanTarget),
+                                      std::move(synctimeline));
 }
 
 MemFdScreenCastBuffer::MemFdScreenCastBuffer(GraphicsBuffer *buffer, GraphicsBufferView &&view)

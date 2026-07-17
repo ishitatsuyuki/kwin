@@ -98,6 +98,7 @@ protected:
 
     bool attemptOpenGLCompositing();
     bool attemptQPainterCompositing();
+    bool attemptVulkanCompositing();
     void handleOutputsChanged();
     void addOutput(LogicalOutput *logicalOutput, BackendOutput *backendOutput);
     void removeOutput(BackendOutput *output);

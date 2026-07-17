@@ -29,6 +29,7 @@
 
 #include <drm_fourcc.h>
 #include <ranges>
+#include <utility>
 #include <xcb/dri3.h>
 #include <xcb/shm.h>
 #include <xcb/xinput.h>
@@ -153,6 +154,13 @@ X11WindowedOutput::X11WindowedOutput(X11WindowedBackend *backend)
 X11WindowedOutput::~X11WindowedOutput()
 {
     m_buffers.clear();
+
+    if (m_pendingWaitFence != XCB_NONE) {
+        xcb_sync_destroy_fence(m_backend->connection(), m_pendingWaitFence);
+    }
+    if (m_presentWaitFence != XCB_NONE) {
+        xcb_sync_destroy_fence(m_backend->connection(), m_presentWaitFence);
+    }
 
     xcb_present_select_input(m_backend->connection(), m_presentEvent, m_window, 0);
     xcb_unmap_window(m_backend->connection(), m_window);
@@ -313,6 +321,10 @@ void X11WindowedOutput::handlePresentCompleteNotify(xcb_present_complete_notify_
     std::chrono::microseconds timestamp(event->ust);
     m_frame->presented(timestamp, PresentationMode::VSync);
     m_frame.reset();
+    if (m_presentWaitFence != XCB_NONE) {
+        xcb_sync_destroy_fence(m_backend->connection(), m_presentWaitFence);
+        m_presentWaitFence = XCB_NONE;
+    }
 }
 
 void X11WindowedOutput::handlePresentIdleNotify(xcb_present_idle_notify_event_t *event)
@@ -438,9 +450,17 @@ xcb_pixmap_t X11WindowedOutput::importBuffer(GraphicsBuffer *graphicsBuffer)
     return x11Buffer->pixmap();
 }
 
-void X11WindowedOutput::setPrimaryBuffer(GraphicsBuffer *buffer)
+void X11WindowedOutput::setPrimaryBuffer(GraphicsBuffer *buffer, FileDescriptor &&acquireFence)
 {
     m_pendingBuffer = importBuffer(buffer);
+    if (m_pendingWaitFence != XCB_NONE) {
+        xcb_sync_destroy_fence(m_backend->connection(), m_pendingWaitFence);
+        m_pendingWaitFence = XCB_NONE;
+    }
+    if (m_pendingBuffer != XCB_PIXMAP_NONE && acquireFence.isValid()) {
+        m_pendingWaitFence = xcb_generate_id(m_backend->connection());
+        xcb_dri3_fence_from_fd(m_backend->connection(), m_window, m_pendingWaitFence, false, acquireFence.take());
+    }
 }
 
 bool X11WindowedOutput::testPresentation(const std::shared_ptr<OutputFrame> &frame)
@@ -481,7 +501,7 @@ bool X11WindowedOutput::present(const QList<OutputLayer *> &layersToUpdate, cons
                        update,
                        0,
                        0,
-                       XCB_NONE,
+                       m_pendingWaitFence,
                        XCB_NONE,
                        XCB_NONE,
                        options,
@@ -490,6 +510,9 @@ bool X11WindowedOutput::present(const QList<OutputLayer *> &layersToUpdate, cons
                        0,
                        0,
                        nullptr);
+
+    Q_ASSERT(m_presentWaitFence == XCB_NONE);
+    m_presentWaitFence = std::exchange(m_pendingWaitFence, XCB_NONE);
 
     Q_ASSERT(!m_frame);
     m_frame = frame;

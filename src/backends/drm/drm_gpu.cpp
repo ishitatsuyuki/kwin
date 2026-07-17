@@ -12,6 +12,7 @@
 
 #include "core/gbmgraphicsbufferallocator.h"
 #include "core/gpumanager.h"
+#include "core/renderdevice.h"
 #include "core/session.h"
 #include "drm_backend.h"
 #include "drm_buffer.h"

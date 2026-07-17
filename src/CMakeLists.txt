@@ -31,6 +31,7 @@ target_compile_definitions(kwin PUBLIC
     -DVULKAN_HPP_NO_EXCEPTIONS=1
     -DVULKAN_HPP_ASSERT_ON_RESULT=void
     -DVULKAN_HPP_NO_SPACESHIP_OPERATOR=1
+    -DVULKAN_HPP_NO_TO_STRING=1
     -DVULKAN_HPP_TYPESAFE_CONVERSION=1
     -DVULKAN_HPP_HANDLES_MOVE_EXCHANGE=1
 )
@@ -92,10 +93,12 @@ target_sources(kwin PRIVATE
     effect/effectframe.cpp
     effect/effecthandler.cpp
     effect/effectloader.cpp
+    effect/effectpluginfactory.cpp
     effect/effecttogglablestate.cpp
     effect/effectwindow.cpp
     effect/logging.cpp
     effect/offscreeneffect.cpp
+    effect/vulkanscreencapture.cpp
     effect/offscreenquickview.cpp
     effect/quickeffect.cpp
     effect/timeline.cpp
@@ -179,6 +182,7 @@ target_sources(kwin PRIVATE
     scene/itemrenderer.cpp
     scene/itemrenderer_opengl.cpp
     scene/itemrenderer_qpainter.cpp
+    scene/itemrenderer_vulkan.cpp
     scene/ninepatch.cpp
     scene/opengl/atlas.cpp
     scene/opengl/ninepatch.cpp
@@ -193,6 +197,9 @@ target_sources(kwin PRIVATE
     scene/surfaceitem_internal.cpp
     scene/surfaceitem_wayland.cpp
     scene/texture.cpp
+    scene/vulkan/atlas.cpp
+    scene/vulkan/ninepatch.cpp
+    scene/vulkan/texture.cpp
     scene/windowitem.cpp
     scene/workspacescene.cpp
     screenedge.cpp
@@ -229,9 +236,12 @@ target_sources(kwin PRIVATE
     virtualdesktops.cpp
     virtualdesktopsdbustypes.cpp
     virtualkeyboard_dbus.cpp
+    vulkan/vulkan_compositor.cpp
+    vulkan/vulkan_backend.cpp
     vulkan/vulkan_device.cpp
     vulkan/vulkan_logging.cpp
     vulkan/vulkan_render_time_query.cpp
+    vulkan/vulkan_rendertarget.cpp
     vulkan/vulkan_swapchain.cpp
     vulkan/vulkan_texture.cpp
     wayland_server.cpp
@@ -245,6 +255,20 @@ target_sources(kwin PRIVATE
     xkb.cpp
     xxpipv1integration.cpp
     xxpipv1window.cpp
+)
+
+qt_add_shaders(kwin "vulkan_compute_shaders"
+    PREFIX
+        "/vulkan"
+    BASE
+        "vulkan/shaders"
+    NOGLSL
+    NOHLSL
+    NOMSL
+    OPTIMIZED
+    FILES
+        vulkan/shaders/tile_preprocess.comp
+        vulkan/shaders/tile_composite.comp
 )
 
 target_link_libraries(kwin
@@ -618,6 +642,7 @@ install(FILES
     effect/animationeffect.h
     effect/effect.h
     effect/effecthandler.h
+    effect/effectpluginfactory.h
     effect/effecttogglablestate.h
     effect/effectwindow.h
     effect/globals.h
@@ -685,6 +710,7 @@ install(FILES
 )
 
 install(FILES
+    vulkan/vulkan_compositor.h
     vulkan/vulkan_device.h
     vulkan/vulkan_logging.h
     vulkan/vulkan_render_time_query.h

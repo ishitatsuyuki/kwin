@@ -9,8 +9,9 @@
 #pragma once
 #include "core/graphicsbuffer.h"
 #include "kwin_export.h"
-#include "renderdevice.h"
 #include "utils/filedescriptor.h"
+
+#include <QHash>
 
 #include <sys/types.h>
 #include <xf86drm.h>
@@ -23,6 +24,7 @@ namespace KWin
 class Udev;
 class UdevMonitor;
 class DrmDevice;
+class RenderDevice;
 
 class KWIN_EXPORT GpuManager : public QObject
 {

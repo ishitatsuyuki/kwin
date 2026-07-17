@@ -537,24 +537,6 @@ bool Effect::blocksDirectScanout() const
     return true;
 }
 
-EffectPluginFactory::EffectPluginFactory()
-{
-}
-
-EffectPluginFactory::~EffectPluginFactory()
-{
-}
-
-bool EffectPluginFactory::enabledByDefault() const
-{
-    return true;
-}
-
-bool EffectPluginFactory::isSupported() const
-{
-    return true;
-}
-
 } // namespace KWin
 
 #include "moc_effect.cpp"

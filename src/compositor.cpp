@@ -30,11 +30,13 @@
 #include "scene/cursoritem.h"
 #include "scene/itemrenderer_opengl.h"
 #include "scene/itemrenderer_qpainter.h"
+#include "scene/itemrenderer_vulkan.h"
 #include "scene/surfaceitem.h"
 #include "scene/surfaceitem_wayland.h"
 #include "scene/workspacescene.h"
 #include "utils/common.h"
 #include "utils/envvar.h"
+#include "vulkan/vulkan_backend.h"
 #include "wayland/surface.h"
 #include "wayland_server.h"
 #include "window.h"
@@ -187,6 +189,17 @@ bool Compositor::attemptQPainterCompositing()
     return true;
 }
 
+bool Compositor::attemptVulkanCompositing()
+{
+    std::unique_ptr<VulkanBackend> backend = kwinApp()->outputBackend()->createVulkanBackend();
+    if (!backend || !backend->device()) {
+        return false;
+    }
+    m_backend = std::move(backend);
+    qCDebug(KWIN_CORE) << "Vulkan compute compositing has been successfully initialized";
+    return true;
+}
+
 void Compositor::createRenderer()
 {
     // If compositing has been restarted, try to use the last used compositing type.
@@ -210,6 +223,10 @@ void Compositor::createRenderer()
     for (auto type : std::as_const(candidateCompositors)) {
         bool stop = false;
         switch (type) {
+        case VulkanCompositing:
+            qCDebug(KWIN_CORE) << "Attempting to load the Vulkan compute scene";
+            stop = attemptVulkanCompositing();
+            break;
         case OpenGLCompositing:
             qCDebug(KWIN_CORE) << "Attempting to load the OpenGL scene";
             stop = attemptOpenGLCompositing();
@@ -270,11 +287,18 @@ void Compositor::start()
         case QPainterCompositing:
             QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
             break;
+        case VulkanCompositing:
+            // Qt Quick render nodes are converted to image items until native
+            // QRhi/Vulkan effect integration is implemented.
+            QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+            break;
         }
     }
 
     if (const auto eglBackend = qobject_cast<EglBackend *>(m_backend.get())) {
         kwinApp()->scene()->attachRenderer(std::make_unique<ItemRendererOpenGL>(eglBackend->eglDisplayObject()));
+    } else if (const auto vulkanBackend = qobject_cast<VulkanBackend *>(m_backend.get())) {
+        kwinApp()->scene()->attachRenderer(std::make_unique<ItemRendererVulkan>(vulkanBackend->device()));
     } else {
         kwinApp()->scene()->attachRenderer(std::make_unique<ItemRendererQPainter>());
     }

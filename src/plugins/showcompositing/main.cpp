@@ -6,6 +6,8 @@
 
 #include "showcompositing.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

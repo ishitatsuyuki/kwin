@@ -233,7 +233,8 @@ void MouseMarkEffect::paintScreen(const RenderTarget &renderTarget, const Render
             glDisable(GL_LINE_SMOOTH);
             glDisable(GL_BLEND);
         }
-    } else if (effects->compositingType() == QPainterCompositing) {
+    } else if (effects->compositingType() == QPainterCompositing
+               || effects->compositingType() == VulkanCompositing) {
         QPainter *painter = effects->scenePainter();
         painter->save();
         QPen pen(color);

@@ -9,6 +9,8 @@
 #include "effect/effect.h"
 #include "scene/itemgeometry.h"
 
+#include <QGenericMatrix>
+
 namespace KWin
 {
 
@@ -64,6 +66,11 @@ protected:
      * Can only be called once the window is redirected.
      **/
     void setShader(EffectWindow *window, GLShader *shader);
+
+    /** Compute-backend equivalents for the built-in offscreen color shaders. */
+    void setVulkanInvert(EffectWindow *window);
+    void setVulkanColor(EffectWindow *window, const QColor &color);
+    void setVulkanColorBlindnessCorrection(EffectWindow *window, const QMatrix3x3 &defectMatrix, qreal intensity);
 
     /**
      * Set what mode to use to snap the vertices of this effect.

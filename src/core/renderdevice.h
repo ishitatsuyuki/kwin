@@ -14,7 +14,6 @@
 #include <QObject>
 #include <QSize>
 #include <memory>
-#include <vulkan/vulkan_raii.hpp>
 
 namespace KWin
 {
@@ -24,6 +23,7 @@ class EglDisplay;
 class EglContext;
 class GraphicsBuffer;
 class VulkanDevice;
+class RenderDevicePrivate;
 
 class KWIN_EXPORT RenderDevice : public QObject
 {
@@ -76,8 +76,7 @@ private:
 
     const std::unique_ptr<DrmDevice> m_device;
     const std::unique_ptr<EglDisplay> m_display;
-    const vk::raii::Context m_vulkanContext;
-    const vk::raii::Instance m_vulkanInstance;
+    const std::unique_ptr<RenderDevicePrivate> m_vulkan;
     std::unique_ptr<VulkanDevice> m_vulkanDevice;
     FormatModifierMap m_allImportableFormats;
     std::weak_ptr<EglContext> m_eglContext;

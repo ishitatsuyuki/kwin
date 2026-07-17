@@ -6,6 +6,8 @@
 
 #include "touchpoints.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

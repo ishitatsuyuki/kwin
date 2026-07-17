@@ -15,6 +15,7 @@
 #include "core/drmdevice.h"
 #include "core/gpumanager.h"
 #include "core/renderbackend.h"
+#include "core/renderdevice.h"
 #include "linuxdmabufv1clientbuffer_p.h"
 #include "surface_p.h"
 #include "utils/common.h"

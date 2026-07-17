@@ -8,6 +8,10 @@
 
 #include "core/rect.h"
 
+#include <QList>
+
+class QImage;
+
 namespace KWin
 {
 

@@ -8,9 +8,9 @@
 namespace KWin
 {
 
-ColorPickerLayer::ColorPickerLayer(BackendOutput *output, GLFramebuffer *buffer)
+ColorPickerLayer::ColorPickerLayer(BackendOutput *output, const RenderTarget &renderTarget)
     : OutputLayer(output, OutputLayerType::Primary)
-    , m_buffer(buffer)
+    , m_renderTarget(renderTarget)
 {
 }
 
@@ -27,7 +27,7 @@ FormatModifierMap ColorPickerLayer::supportedDrmFormats() const
 std::optional<OutputLayerBeginFrameInfo> ColorPickerLayer::doBeginFrame()
 {
     return OutputLayerBeginFrameInfo{
-        .renderTarget = RenderTarget(m_buffer),
+        .renderTarget = m_renderTarget,
         .repaint = Region::infinite(),
     };
 }

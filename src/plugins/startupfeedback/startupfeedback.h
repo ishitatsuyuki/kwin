@@ -16,8 +16,10 @@
 #include <KStartupInfo>
 #endif
 #include <QIcon>
+#include <QImage>
 #include <QObject>
 
+#include <array>
 #include <chrono>
 
 namespace KWin
@@ -93,6 +95,8 @@ private:
     AnimationClock m_clock;
     std::unique_ptr<GLTexture> m_bouncingTextures[5];
     std::unique_ptr<GLTexture> m_texture; // for passive and blinking
+    std::array<QImage, 5> m_bouncingImages;
+    QImage m_image;
     FeedbackType m_type;
     Rect m_currentGeometry, m_dirtyRect;
     std::unique_ptr<GLShader> m_blinkingShader;

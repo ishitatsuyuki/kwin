@@ -29,7 +29,7 @@ ShowCompositingEffect::~ShowCompositingEffect()
 
 bool ShowCompositingEffect::supported()
 {
-    return effects->isOpenGLCompositing();
+    return effects->isOpenGLCompositing() || effects->compositingType() == VulkanCompositing;
 }
 
 bool ShowCompositingEffect::blocksDirectScanout() const

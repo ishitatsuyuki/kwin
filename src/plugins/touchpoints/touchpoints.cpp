@@ -180,7 +180,8 @@ void TouchPointsEffect::drawCircle(const RenderViewport &viewport, const QColor 
 {
     if (effects->isOpenGLCompositing()) {
         drawCircleGl(viewport, color, cx, cy, r);
-    } else if (effects->compositingType() == QPainterCompositing) {
+    } else if (effects->compositingType() == QPainterCompositing
+               || effects->compositingType() == VulkanCompositing) {
         drawCircleQPainter(color, cx, cy, r);
     }
 }

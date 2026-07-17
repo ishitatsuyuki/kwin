@@ -31,6 +31,8 @@
 #include "cursorsource.h"
 #include "effect/effecthandler.h"
 #include "opengl/glutils.h"
+#include "scene/itemrenderer.h"
+#include "scene/workspacescene.h"
 
 // based on StartupId in KRunner by Lubos Lunak
 // SPDX-FileCopyrightText: 2001 Lubos Lunak <l.lunak@kde.org>
@@ -125,7 +127,8 @@ StartupFeedbackEffect::~StartupFeedbackEffect()
 
 bool StartupFeedbackEffect::supported()
 {
-    return effects->isOpenGLCompositing();
+    return effects->isOpenGLCompositing()
+        || effects->compositingType() == VulkanCompositing;
 }
 
 void StartupFeedbackEffect::reconfigure(Effect::ReconfigureFlags flags)
@@ -195,6 +198,35 @@ void StartupFeedbackEffect::paintScreen(const RenderTarget &renderTarget, const 
 {
     effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
     if (m_active) {
+        if (effects->compositingType() == VulkanCompositing) {
+            const QImage *image = nullptr;
+            switch (m_type) {
+            case BouncingFeedback:
+                image = &m_bouncingImages[FRAME_TO_BOUNCE_TEXTURE[m_frame]];
+                break;
+            case BlinkingFeedback:
+            case PassiveFeedback:
+                image = &m_image;
+                break;
+            default:
+                return;
+            }
+            if (!image || image->isNull()) {
+                return;
+            }
+            QImage tinted;
+            if (m_type == BlinkingFeedback) {
+                tinted = image->copy();
+                QPainter tintPainter(&tinted);
+                tintPainter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+                tintPainter.fillRect(tinted.rect(), BLINKING_COLORS[FRAME_TO_BLINKING_COLOR[m_frame]]);
+                image = &tinted;
+            }
+            if (QPainter *painter = effects->scene()->renderer()->painter()) {
+                painter->drawImage(static_cast<QRect>(m_currentGeometry), *image);
+            }
+            return;
+        }
         GLTexture *texture;
         switch (m_type) {
         case BouncingFeedback:
@@ -347,16 +379,20 @@ void StartupFeedbackEffect::stop()
     disconnect(effects, &EffectsHandler::mouseChanged, this, &StartupFeedbackEffect::slotMouseChanged);
     m_active = false;
     m_clock.reset();
-    effects->makeOpenGLContextCurrent();
+    if (effects->isOpenGLCompositing()) {
+        effects->makeOpenGLContextCurrent();
+    }
     switch (m_type) {
     case BouncingFeedback:
         for (int i = 0; i < 5; ++i) {
             m_bouncingTextures[i].reset();
+            m_bouncingImages[i] = {};
         }
         break;
     case BlinkingFeedback:
     case PassiveFeedback:
         m_texture.reset();
+        m_image = {};
         break;
     case NoFeedback:
         return; // don't want the full repaint
@@ -368,6 +404,23 @@ void StartupFeedbackEffect::stop()
 
 void StartupFeedbackEffect::prepareTextures(const QPixmap &pix)
 {
+    if (effects->compositingType() == VulkanCompositing) {
+        switch (m_type) {
+        case BouncingFeedback:
+            for (int i = 0; i < 5; ++i) {
+                m_bouncingImages[i] = scalePixmap(pix, BOUNCE_SIZES[i]);
+            }
+            break;
+        case BlinkingFeedback:
+        case PassiveFeedback:
+            m_image = pix.toImage().convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+            break;
+        default:
+            stop();
+            break;
+        }
+        return;
+    }
     effects->makeOpenGLContextCurrent();
     switch (m_type) {
     case BouncingFeedback:
@@ -435,16 +488,20 @@ Rect StartupFeedbackEffect::feedbackRect() const
         xDiff = 32 + 7;
     }
     int yDiff = xDiff;
-    GLTexture *texture = nullptr;
+    bool hasTexture = false;
     int yOffset = 0;
     switch (m_type) {
     case BouncingFeedback:
-        texture = m_bouncingTextures[FRAME_TO_BOUNCE_TEXTURE[m_frame]].get();
+        hasTexture = effects->compositingType() == VulkanCompositing
+            ? !m_bouncingImages[FRAME_TO_BOUNCE_TEXTURE[m_frame]].isNull()
+            : bool(m_bouncingTextures[FRAME_TO_BOUNCE_TEXTURE[m_frame]]);
         yOffset = FRAME_TO_BOUNCE_YOFFSET[m_frame] * m_bounceSizesRatio;
         break;
     case BlinkingFeedback: // fall through
     case PassiveFeedback:
-        texture = m_texture.get();
+        hasTexture = effects->compositingType() == VulkanCompositing
+            ? !m_image.isNull()
+            : bool(m_texture);
         break;
     default:
         // nothing
@@ -452,7 +509,7 @@ Rect StartupFeedbackEffect::feedbackRect() const
     }
     const QPoint cursorPos = effects->cursorPos().toPoint() + QPoint(xDiff, yDiff + yOffset);
     Rect rect;
-    if (texture) {
+    if (hasTexture) {
         rect = Rect(cursorPos, feedbackIconSize());
     }
     return rect;

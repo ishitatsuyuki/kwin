@@ -40,7 +40,8 @@ void ShowPaintEffect::paintScreen(const RenderTarget &renderTarget, const Render
     effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
     if (effects->isOpenGLCompositing()) {
         paintGL(renderTarget, viewport);
-    } else if (effects->compositingType() == QPainterCompositing) {
+    } else if (effects->compositingType() == QPainterCompositing
+               || effects->compositingType() == VulkanCompositing) {
         paintQPainter(viewport);
     }
     if (++m_colorIndex == s_colors.count()) {

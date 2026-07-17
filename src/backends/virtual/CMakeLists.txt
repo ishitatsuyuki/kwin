@@ -4,4 +4,5 @@ target_sources(kwin PRIVATE
     virtual_logging.cpp
     virtual_output.cpp
     virtual_qpainter_backend.cpp
+    virtual_vulkan_backend.cpp
 )

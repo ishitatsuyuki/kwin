@@ -19,7 +19,6 @@
 // Qt
 #include <QList>
 #include <QLoggingCategory>
-#include <QMatrix4x4>
 #include <QPoint>
 // system
 #include <climits>

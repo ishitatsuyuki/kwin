@@ -6,6 +6,8 @@
 
 #include "overvieweffect.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

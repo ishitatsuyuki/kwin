@@ -16,9 +16,11 @@
 #include "opengl/glplatform.h"
 #include "scene/backgroundeffectitem.h"
 #include "scene/decorationitem.h"
+#include "scene/itemrenderer_vulkan.h"
 #include "scene/scene.h"
 #include "scene/surfaceitem.h"
 #include "scene/windowitem.h"
+#include "scene/workspacescene.h"
 #include "wayland/backgroundeffect_v1.h"
 #include "wayland/display.h"
 #include "wayland/surface.h"
@@ -90,68 +92,71 @@ BlurEffect::BlurEffect()
     BlurConfig::instance(effects->config());
     ensureResources();
 
-    m_onscreenPass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
-                                                                              QStringLiteral(":/effects/blur/shaders/vertex.vert"),
-                                                                              QStringLiteral(":/effects/blur/shaders/onscreen.frag"));
-    if (!m_onscreenPass.shader) {
-        qCWarning(KWIN_BLUR) << "Failed to load onscreen pass shader";
-        return;
-    } else {
-        m_onscreenPass.mvpMatrixLocation = m_onscreenPass.shader->uniformLocation("modelViewProjectionMatrix");
-        m_onscreenPass.colorMatrixLocation = m_onscreenPass.shader->uniformLocation("colorMatrix");
-        m_onscreenPass.offsetLocation = m_onscreenPass.shader->uniformLocation("offset");
-        m_onscreenPass.halfpixelLocation = m_onscreenPass.shader->uniformLocation("halfpixel");
-    }
+    const bool vulkan = effects->compositingType() == VulkanCompositing;
+    if (!vulkan) {
+        m_onscreenPass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
+                                                                                  QStringLiteral(":/effects/blur/shaders/vertex.vert"),
+                                                                                  QStringLiteral(":/effects/blur/shaders/onscreen.frag"));
+        if (!m_onscreenPass.shader) {
+            qCWarning(KWIN_BLUR) << "Failed to load onscreen pass shader";
+            return;
+        } else {
+            m_onscreenPass.mvpMatrixLocation = m_onscreenPass.shader->uniformLocation("modelViewProjectionMatrix");
+            m_onscreenPass.colorMatrixLocation = m_onscreenPass.shader->uniformLocation("colorMatrix");
+            m_onscreenPass.offsetLocation = m_onscreenPass.shader->uniformLocation("offset");
+            m_onscreenPass.halfpixelLocation = m_onscreenPass.shader->uniformLocation("halfpixel");
+        }
 
-    m_roundedOnscreenPass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
-                                                                                     QStringLiteral(":/effects/blur/shaders/onscreen_rounded.vert"),
-                                                                                     QStringLiteral(":/effects/blur/shaders/onscreen_rounded.frag"));
-    if (!m_roundedOnscreenPass.shader) {
-        qCWarning(KWIN_BLUR) << "Failed to load onscreen pass shader";
-        return;
-    } else {
-        m_roundedOnscreenPass.mvpMatrixLocation = m_roundedOnscreenPass.shader->uniformLocation("modelViewProjectionMatrix");
-        m_roundedOnscreenPass.colorMatrixLocation = m_roundedOnscreenPass.shader->uniformLocation("colorMatrix");
-        m_roundedOnscreenPass.offsetLocation = m_roundedOnscreenPass.shader->uniformLocation("offset");
-        m_roundedOnscreenPass.halfpixelLocation = m_roundedOnscreenPass.shader->uniformLocation("halfpixel");
-        m_roundedOnscreenPass.boxLocation = m_roundedOnscreenPass.shader->uniformLocation("box");
-        m_roundedOnscreenPass.cornerRadiusLocation = m_roundedOnscreenPass.shader->uniformLocation("cornerRadius");
-        m_roundedOnscreenPass.opacityLocation = m_roundedOnscreenPass.shader->uniformLocation("opacity");
-    }
+        m_roundedOnscreenPass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
+                                                                                         QStringLiteral(":/effects/blur/shaders/onscreen_rounded.vert"),
+                                                                                         QStringLiteral(":/effects/blur/shaders/onscreen_rounded.frag"));
+        if (!m_roundedOnscreenPass.shader) {
+            qCWarning(KWIN_BLUR) << "Failed to load onscreen pass shader";
+            return;
+        } else {
+            m_roundedOnscreenPass.mvpMatrixLocation = m_roundedOnscreenPass.shader->uniformLocation("modelViewProjectionMatrix");
+            m_roundedOnscreenPass.colorMatrixLocation = m_roundedOnscreenPass.shader->uniformLocation("colorMatrix");
+            m_roundedOnscreenPass.offsetLocation = m_roundedOnscreenPass.shader->uniformLocation("offset");
+            m_roundedOnscreenPass.halfpixelLocation = m_roundedOnscreenPass.shader->uniformLocation("halfpixel");
+            m_roundedOnscreenPass.boxLocation = m_roundedOnscreenPass.shader->uniformLocation("box");
+            m_roundedOnscreenPass.cornerRadiusLocation = m_roundedOnscreenPass.shader->uniformLocation("cornerRadius");
+            m_roundedOnscreenPass.opacityLocation = m_roundedOnscreenPass.shader->uniformLocation("opacity");
+        }
 
-    m_downsamplePass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
-                                                                                QStringLiteral(":/effects/blur/shaders/vertex.vert"),
-                                                                                QStringLiteral(":/effects/blur/shaders/downsample.frag"));
-    if (!m_downsamplePass.shader) {
-        qCWarning(KWIN_BLUR) << "Failed to load downsampling pass shader";
-        return;
-    } else {
-        m_downsamplePass.mvpMatrixLocation = m_downsamplePass.shader->uniformLocation("modelViewProjectionMatrix");
-        m_downsamplePass.offsetLocation = m_downsamplePass.shader->uniformLocation("offset");
-        m_downsamplePass.halfpixelLocation = m_downsamplePass.shader->uniformLocation("halfpixel");
-    }
+        m_downsamplePass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
+                                                                                    QStringLiteral(":/effects/blur/shaders/vertex.vert"),
+                                                                                    QStringLiteral(":/effects/blur/shaders/downsample.frag"));
+        if (!m_downsamplePass.shader) {
+            qCWarning(KWIN_BLUR) << "Failed to load downsampling pass shader";
+            return;
+        } else {
+            m_downsamplePass.mvpMatrixLocation = m_downsamplePass.shader->uniformLocation("modelViewProjectionMatrix");
+            m_downsamplePass.offsetLocation = m_downsamplePass.shader->uniformLocation("offset");
+            m_downsamplePass.halfpixelLocation = m_downsamplePass.shader->uniformLocation("halfpixel");
+        }
 
-    m_upsamplePass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
-                                                                              QStringLiteral(":/effects/blur/shaders/vertex.vert"),
-                                                                              QStringLiteral(":/effects/blur/shaders/upsample.frag"));
-    if (!m_upsamplePass.shader) {
-        qCWarning(KWIN_BLUR) << "Failed to load upsampling pass shader";
-        return;
-    } else {
-        m_upsamplePass.mvpMatrixLocation = m_upsamplePass.shader->uniformLocation("modelViewProjectionMatrix");
-        m_upsamplePass.offsetLocation = m_upsamplePass.shader->uniformLocation("offset");
-        m_upsamplePass.halfpixelLocation = m_upsamplePass.shader->uniformLocation("halfpixel");
-    }
+        m_upsamplePass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
+                                                                                  QStringLiteral(":/effects/blur/shaders/vertex.vert"),
+                                                                                  QStringLiteral(":/effects/blur/shaders/upsample.frag"));
+        if (!m_upsamplePass.shader) {
+            qCWarning(KWIN_BLUR) << "Failed to load upsampling pass shader";
+            return;
+        } else {
+            m_upsamplePass.mvpMatrixLocation = m_upsamplePass.shader->uniformLocation("modelViewProjectionMatrix");
+            m_upsamplePass.offsetLocation = m_upsamplePass.shader->uniformLocation("offset");
+            m_upsamplePass.halfpixelLocation = m_upsamplePass.shader->uniformLocation("halfpixel");
+        }
 
-    m_noisePass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
-                                                                           QStringLiteral(":/effects/blur/shaders/vertex.vert"),
-                                                                           QStringLiteral(":/effects/blur/shaders/noise.frag"));
-    if (!m_noisePass.shader) {
-        qCWarning(KWIN_BLUR) << "Failed to load noise pass shader";
-        return;
-    } else {
-        m_noisePass.mvpMatrixLocation = m_noisePass.shader->uniformLocation("modelViewProjectionMatrix");
-        m_noisePass.noiseTextureSizeLocation = m_noisePass.shader->uniformLocation("noiseTextureSize");
+        m_noisePass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
+                                                                               QStringLiteral(":/effects/blur/shaders/vertex.vert"),
+                                                                               QStringLiteral(":/effects/blur/shaders/noise.frag"));
+        if (!m_noisePass.shader) {
+            qCWarning(KWIN_BLUR) << "Failed to load noise pass shader";
+            return;
+        } else {
+            m_noisePass.mvpMatrixLocation = m_noisePass.shader->uniformLocation("modelViewProjectionMatrix");
+            m_noisePass.noiseTextureSizeLocation = m_noisePass.shader->uniformLocation("noiseTextureSize");
+        }
     }
 
     initBlurStrengthValues();
@@ -322,7 +327,9 @@ void BlurEffect::updateBlurRegion(EffectWindow *w)
         data.blurItem->setEffectBoundingRect(blurRegion(w).boundingRect());
     } else {
         if (auto it = m_windows.find(w); it != m_windows.end()) {
-            effects->makeOpenGLContextCurrent();
+            if (effects->isOpenGLCompositing()) {
+                effects->makeOpenGLContextCurrent();
+            }
             m_windows.erase(it);
         }
     }
@@ -355,7 +362,9 @@ void BlurEffect::slotWindowAdded(EffectWindow *w)
 void BlurEffect::slotWindowDeleted(EffectWindow *w)
 {
     if (auto it = m_windows.find(w); it != m_windows.end()) {
-        effects->makeOpenGLContextCurrent();
+        if (effects->isOpenGLCompositing()) {
+            effects->makeOpenGLContextCurrent();
+        }
         m_windows.erase(it);
     }
     if (auto it = windowBlurChangedConnections.find(w); it != windowBlurChangedConnections.end()) {
@@ -368,7 +377,9 @@ void BlurEffect::slotViewRemoved(KWin::RenderView *view)
 {
     for (auto &[window, data] : m_windows) {
         if (auto it = data.render.find(view); it != data.render.end()) {
-            effects->makeOpenGLContextCurrent();
+            if (effects->isOpenGLCompositing()) {
+                effects->makeOpenGLContextCurrent();
+            }
             data.render.erase(it);
         }
     }
@@ -410,6 +421,9 @@ bool BlurEffect::eventFilter(QObject *watched, QEvent *event)
 
 bool BlurEffect::enabledByDefault()
 {
+    if (effects->compositingType() == VulkanCompositing) {
+        return true;
+    }
     const auto context = effects->openglContext();
     if (!context || context->isSoftwareRenderer()) {
         return false;
@@ -431,7 +445,8 @@ bool BlurEffect::enabledByDefault()
 
 bool BlurEffect::supported()
 {
-    return effects->isOpenGLCompositing();
+    return effects->isOpenGLCompositing()
+        || effects->compositingType() == VulkanCompositing;
 }
 
 bool BlurEffect::decorationSupportsBlurBehind(const EffectWindow *w) const
@@ -555,7 +570,6 @@ void BlurEffect::blur(const RenderTarget &renderTarget, const RenderViewport &vi
     }
 
     BlurEffectData &blurInfo = it->second;
-    BlurRenderData &renderInfo = blurInfo.render[m_currentView];
     if (!shouldBlur(w, mask, data)) {
         return;
     }
@@ -597,6 +611,53 @@ void BlurEffect::blur(const RenderTarget &renderTarget, const RenderViewport &vi
     if (effectiveShape.isEmpty()) {
         return;
     }
+
+    if (effects->compositingType() == VulkanCompositing) {
+        auto renderer = dynamic_cast<ItemRendererVulkan *>(effects->scene()->renderer());
+        if (!renderer) {
+            return;
+        }
+        const Region targetClip = deviceRegion == Region::infinite()
+            ? Region(0, 0, renderTarget.size().width(), renderTarget.size().height())
+            : viewport.mapToRenderTarget(viewport.mapFromDeviceCoordinatesAligned(deviceRegion));
+        QList<QRectF> targetShape;
+        for (const RectF &shapeRect : blurShape.rects()) {
+            const QRectF mapped = viewport.mapToRenderTarget(shapeRect);
+            for (const Rect &clipRect : targetClip.rects()) {
+                if (const QRectF clipped = mapped.intersected(static_cast<QRect>(clipRect)); !clipped.isEmpty()) {
+                    targetShape.push_back(clipped);
+                }
+            }
+        }
+        if (targetShape.isEmpty()) {
+            return;
+        }
+
+        std::optional<QRectF> roundedRect;
+        QVector4D cornerRadii;
+        if (const BorderRadius radius = w->window()->borderRadius(); !radius.isNull()) {
+            const RectF transformedRect{
+                w->frameGeometry().x() + data.xTranslation(),
+                w->frameGeometry().y() + data.yTranslation(),
+                w->frameGeometry().width() * data.xScale(),
+                w->frameGeometry().height() * data.yScale(),
+            };
+            roundedRect = viewport.mapToRenderTarget(transformedRect);
+            cornerRadii = radius.scaled(viewport.scale()).rounded().toVector();
+        }
+        renderer->renderBackdropBlur(targetShape,
+                                     uint32_t(m_iterationCount),
+                                     m_offset,
+                                     opacity * opacity,
+                                     opacity,
+                                     m_noiseStrength,
+                                     m_colorMatrix,
+                                     roundedRect,
+                                     cornerRadii);
+        return;
+    }
+
+    BlurRenderData &renderInfo = blurInfo.render[m_currentView];
 
     // Maybe reallocate offscreen render targets. Keep in mind that the first one contains
     // original background behind the window, it's not blurred.

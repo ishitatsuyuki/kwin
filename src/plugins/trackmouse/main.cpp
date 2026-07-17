@@ -6,6 +6,8 @@
 
 #include "trackmouse.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

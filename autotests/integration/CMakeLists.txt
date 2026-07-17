@@ -105,6 +105,17 @@ if (KWIN_BUILD_SCREENLOCKER)
 endif()
 integrationTest(NAME testBounceKeys SRCS bounce_keys_test.cpp)
 integrationTest(NAME testVulkan SRCS vulkan_test.cpp)
+integrationTest(NAME testVulkanCompositorIntegration SRCS vulkan_compositor_integration_test.cpp BUILTIN_EFFECTS)
+set_tests_properties(kwin-testVulkan PROPERTIES
+    ENVIRONMENT "KWIN_VULKAN_VALIDATION=1"
+    FAIL_REGULAR_EXPRESSION "Validation Error;Validation Warning"
+)
+set_tests_properties(kwin-testVulkanCompositorIntegration PROPERTIES
+    ENVIRONMENT "KWIN_VULKAN_VALIDATION=1"
+    FAIL_REGULAR_EXPRESSION "Validation Error;Validation Warning"
+)
+add_executable(vulkanCompositorBenchmark vulkan_compositor_benchmark.cpp)
+target_link_libraries(vulkanCompositorBenchmark KWinIntegrationTestFramework Qt::Test)
 integrationTest(NAME testButtonRebind SRCS buttonrebind_test.cpp)
 if (KWIN_BUILD_GAMECONTROLLER)
     integrationTest(NAME testGameController SRCS gamecontroller_test.cpp LIBS KF6::IdleTime PkgConfig::libevdev PROPERTIES RUN_SERIAL TRUE)

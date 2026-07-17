@@ -9,6 +9,7 @@
 #include "core/backendoutput.h"
 #include "core/colorpipeline.h"
 #include "core/drm_formats.h"
+#include "core/region.h"
 #include "core/rendertarget.h"
 #include "kwin_export.h"
 
@@ -24,6 +25,7 @@ namespace KWin
 class SurfaceItem;
 class DrmDevice;
 class GraphicsBuffer;
+class Item;
 class OutputFrame;
 class GLTexture;
 

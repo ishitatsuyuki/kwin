@@ -14,8 +14,11 @@
 #include "core/renderviewport.h"
 #include "cursor.h"
 #include "effect/effecthandler.h"
+#include "effect/vulkanscreencapture.h"
 #include "focustracker.h"
 #include "opengl/glutils.h"
+#include "scene/itemrenderer_vulkan.h"
+#include "scene/workspacescene.h"
 #include "textcarettracker.h"
 #include "utils/keys.h"
 #include "zoomconfig.h"
@@ -346,6 +349,60 @@ GLShader *ZoomEffect::shaderForZoom(double zoom)
 
 void ZoomEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
+    if (effects->compositingType() == VulkanCompositing) {
+        effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
+        auto renderer = dynamic_cast<ItemRendererVulkan *>(effects->scene()->renderer());
+        if (!renderer) {
+            return;
+        }
+        OffscreenData &data = m_offscreenData[screen];
+        data.viewport = viewport.renderRect();
+        data.color = renderTarget.colorDescription();
+        if (!data.vulkanCapture) {
+            data.vulkanCapture = std::make_unique<VulkanScreenCapture>(renderer->device());
+        }
+        VulkanTexture *texture = data.vulkanCapture->capture(renderer, renderTarget.size(), data.color);
+        if (!texture) {
+            return;
+        }
+
+        const auto mapPoint = [this, &viewport](const QPointF &point) {
+            return viewport.mapToRenderTarget(QPointF(m_xTranslation + point.x() * m_zoom,
+                                                      m_yTranslation + point.y() * m_zoom));
+        };
+        const RectF rect = viewport.renderRect();
+        const std::array vertices{
+            mapPoint(rect.topLeft()),
+            mapPoint(rect.topRight()),
+            mapPoint(rect.bottomRight()),
+            mapPoint(rect.bottomLeft()),
+        };
+        const std::array textureCoordinates{
+            QPointF(0, 0),
+            QPointF(1, 0),
+            QPointF(1, 1),
+            QPointF(0, 1),
+        };
+        const VulkanColorFilter colorFilter = m_zoom >= m_pixelGridZoom
+            ? VulkanColorFilter::ZoomPixelGrid
+            : (m_usePatternUpscaler ? VulkanColorFilter::ZoomPatternUpscale : VulkanColorFilter::None);
+        // Match the OpenGL offscreen path: the captured scene replaces the
+        // untransformed layers instead of being composited over them twice.
+        renderer->renderClearRect(QRectF(QPointF(), QSizeF(renderTarget.size())));
+        renderer->renderTextureQuad(texture,
+                                    vertices,
+                                    textureCoordinates,
+                                    QRectF(QPointF(), QSizeF(renderTarget.size())),
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    data.color,
+                                    colorFilter,
+                                    {},
+                                    QVector4D(m_zoom, 0.0, 0.0, 0.0));
+        return;
+    }
+
     OffscreenData *offscreenData = ensureOffscreenData(renderTarget, viewport, screen);
     if (!offscreenData) {
         return;

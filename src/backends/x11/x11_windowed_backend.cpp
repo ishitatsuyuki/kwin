@@ -13,12 +13,15 @@
 
 #include "core/gpumanager.h"
 #include "core/renderdevice.h"
+#include "core/renderloop.h"
 #include "pointer_input.h"
 #include "utils/xcbutils.h"
+#include "vulkan/vulkan_device.h"
 #include "x11_windowed_egl_backend.h"
 #include "x11_windowed_logging.h"
 #include "x11_windowed_output.h"
 #include "x11_windowed_qpainter_backend.h"
+#include "x11_windowed_vulkan_backend.h"
 // KDE
 #include <KLocalizedString>
 #include <QAbstractEventDispatcher>
@@ -707,6 +710,14 @@ std::unique_ptr<QPainterBackend> X11WindowedBackend::createQPainterBackend()
     return std::make_unique<X11WindowedQPainterBackend>(this);
 }
 
+std::unique_ptr<VulkanBackend> X11WindowedBackend::createVulkanBackend()
+{
+    if (!m_renderDevice || !m_renderDevice->vulkanDevice()) {
+        return nullptr;
+    }
+    return std::make_unique<X11WindowedVulkanBackend>(this);
+}
+
 std::unique_ptr<InputBackend> X11WindowedBackend::createInputBackend()
 {
     return std::make_unique<X11WindowedInputBackend>(this);
@@ -769,6 +780,11 @@ QList<CompositingType> X11WindowedBackend::supportedCompositors() const
     QList<CompositingType> ret;
     if (m_renderDevice) {
         ret.append(OpenGLCompositing);
+        VulkanDevice *vulkan = m_renderDevice->vulkanDevice();
+        const uint32_t format = driFormatForDepth(m_screen->root_depth);
+        if (vulkan && !vulkan->computeOutputFormats().value(format).intersected(m_driFormats.value(format)).isEmpty()) {
+            ret.append(VulkanCompositing);
+        }
     }
     if (m_hasShm) {
         ret.append(QPainterCompositing);

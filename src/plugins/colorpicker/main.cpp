@@ -6,6 +6,8 @@
 
 #include "colorpicker.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

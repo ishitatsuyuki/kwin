@@ -2012,6 +2012,9 @@ QString Workspace::supportInformation() const
         case QPainterCompositing:
             support.append("Compositing Type: QPainter\n");
             break;
+        case VulkanCompositing:
+            support.append("Compositing Type: Vulkan compute\n");
+            break;
         case NoCompositing:
         default:
             support.append(QStringLiteral("Something is really broken, neither OpenGL nor QPainter is used"));

@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include "core/output.h"
+#include "core/rect.h"
 #include "kwin_export.h"
 
 #include "globals.h"

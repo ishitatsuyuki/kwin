@@ -6,6 +6,8 @@
 
 #include "diminactive.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

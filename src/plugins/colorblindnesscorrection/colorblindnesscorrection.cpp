@@ -38,7 +38,8 @@ ColorBlindnessCorrectionEffect::~ColorBlindnessCorrectionEffect()
 
 bool ColorBlindnessCorrectionEffect::supported()
 {
-    return effects->isOpenGLCompositing();
+    return effects->isOpenGLCompositing()
+        || effects->compositingType() == VulkanCompositing;
 }
 
 void ColorBlindnessCorrectionEffect::loadData()
@@ -88,19 +89,21 @@ void ColorBlindnessCorrectionEffect::loadData()
         break;
     }
 
-    m_shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture, QString(), fragPath);
+    if (effects->compositingType() != VulkanCompositing) {
+        m_shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture, QString(), fragPath);
 
-    if (!m_shader) {
-        qCCritical(KWIN_COLORBLINDNESS_CORRECTION) << "Failed to load the shader!";
-        return;
-    }
+        if (!m_shader) {
+            qCCritical(KWIN_COLORBLINDNESS_CORRECTION) << "Failed to load the shader!";
+            return;
+        }
 
-    ShaderBinder binder{m_shader.get()};
+        ShaderBinder binder{m_shader.get()};
 
-    if (m_mode != Monochrome) {
-        // These uniforms aren't present in the monochrome shader, so we shouldn't set them there.
-        m_shader->setUniform("intensity", m_intensity);
-        m_shader->setUniform("defectMatrix", defectMatrix);
+        if (m_mode != Monochrome) {
+            // These uniforms aren't present in the monochrome shader, so we shouldn't set them there.
+            m_shader->setUniform("intensity", m_intensity);
+            m_shader->setUniform("defectMatrix", defectMatrix);
+        }
     }
 
     for (const auto windows = effects->stackingOrder(); EffectWindow *w : windows) {
@@ -134,7 +137,50 @@ void ColorBlindnessCorrectionEffect::correctColor(KWin::EffectWindow *w)
     }
 
     redirect(w);
-    setShader(w, m_shader.get());
+    if (effects->compositingType() == VulkanCompositing) {
+        if (m_mode != Monochrome) {
+            QMatrix3x3 defectMatrix;
+            switch (m_mode) {
+            case Deuteranopia:
+                defectMatrix(0, 0) = 1.0;
+                defectMatrix(1, 0) = 0.494207;
+                defectMatrix(2, 0) = 0.0;
+                defectMatrix(0, 1) = 0.0;
+                defectMatrix(1, 1) = 0.0;
+                defectMatrix(2, 1) = 0.0;
+                defectMatrix(0, 2) = 0.0;
+                defectMatrix(1, 2) = 1.24827;
+                defectMatrix(2, 2) = 1.0;
+                break;
+            case Tritanopia:
+                defectMatrix(0, 0) = 1.0;
+                defectMatrix(1, 0) = 0.0;
+                defectMatrix(2, 0) = -0.395913;
+                defectMatrix(0, 1) = 0.0;
+                defectMatrix(1, 1) = 1.0;
+                defectMatrix(2, 1) = 0.801109;
+                defectMatrix(0, 2) = 0.0;
+                defectMatrix(1, 2) = 0.0;
+                defectMatrix(2, 2) = 0.0;
+                break;
+            case Protanopia:
+            default:
+                defectMatrix(0, 0) = 0.0;
+                defectMatrix(1, 0) = 0.0;
+                defectMatrix(2, 0) = 0.0;
+                defectMatrix(0, 1) = 2.02344;
+                defectMatrix(1, 1) = 1.0;
+                defectMatrix(2, 1) = 0.0;
+                defectMatrix(0, 2) = -2.52581;
+                defectMatrix(1, 2) = 0.0;
+                defectMatrix(2, 2) = 1.0;
+                break;
+            }
+            setVulkanColorBlindnessCorrection(w, defectMatrix, m_intensity);
+        }
+    } else {
+        setShader(w, m_shader.get());
+    }
     m_windows.insert(w);
 }
 

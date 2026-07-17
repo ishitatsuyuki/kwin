@@ -6,6 +6,8 @@
 
 #include "kscreen.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

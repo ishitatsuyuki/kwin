@@ -11,6 +11,7 @@
 #include "core/gpumanager.h"
 #include "core/graphicsbuffer.h"
 #include "core/renderbackend.h"
+#include "core/renderdevice.h"
 #include "core/syncobjtimeline.h"
 #include "opengl/eglcontext.h"
 #include "opengl/egldisplay.h"
@@ -199,14 +200,35 @@ std::optional<MultiGpuSwapchain::Ret> MultiGpuSwapchain::copyWithVulkan(Graphics
 
     std::unique_ptr<VulkanRenderTimeQuery> query;
     if (frame) {
-        query = VulkanRenderTimeQuery::begin(copyVk, commandBuffer, copyVk->graphicsQueueFamily());
+        query = VulkanRenderTimeQuery::begin(copyVk,
+                                             commandBuffer,
+                                             copyVk->graphicsQueueFamily(),
+                                             vk::PipelineStageFlagBits2::eAllCommands);
     }
 
-    vk::ImageMemoryBarrier2 memoryBarrier{
-        vk::PipelineStageFlagBits2::eAllCommands,
-        vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eMemoryRead,
-        vk::PipelineStageFlagBits2::eAllCommands,
-        vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eMemoryRead,
+    const vk::ImageMemoryBarrier2 sourceAcquire{
+        vk::PipelineStageFlagBits2::eNone,
+        vk::AccessFlags2{},
+        vk::PipelineStageFlagBits2::eTransfer,
+        vk::AccessFlagBits2::eTransferRead,
+        vk::ImageLayout::eGeneral,
+        vk::ImageLayout::eGeneral,
+        vk::QueueFamilyExternal,
+        copyVk->graphicsQueueFamily(),
+        srcTexture->handle(),
+        vk::ImageSubresourceRange{
+            vk::ImageAspectFlagBits::eColor,
+            0,
+            1,
+            0,
+            1,
+        },
+    };
+    const vk::ImageMemoryBarrier2 destinationAcquire{
+        vk::PipelineStageFlagBits2::eNone,
+        vk::AccessFlags2{},
+        vk::PipelineStageFlagBits2::eTransfer,
+        vk::AccessFlagBits2::eTransferWrite,
         vk::ImageLayout::eGeneral,
         vk::ImageLayout::eGeneral,
         vk::QueueFamilyExternal,
@@ -220,11 +242,12 @@ std::optional<MultiGpuSwapchain::Ret> MultiGpuSwapchain::copyWithVulkan(Graphics
             1,
         },
     };
+    const std::array acquireBarriers{sourceAcquire, destinationAcquire};
     commandBuffer.pipelineBarrier2(vk::DependencyInfo{
         vk::DependencyFlags{},
         {},
         {},
-        memoryBarrier,
+        acquireBarriers,
     });
 
     const std::vector<vk::ImageBlit> regions = toRender.rects() | std::views::transform([&completeRect](const Rect &rect) {
@@ -257,13 +280,26 @@ std::optional<MultiGpuSwapchain::Ret> MultiGpuSwapchain::copyWithVulkan(Graphics
                             m_currentVulkanSlot->texture()->handle(), vk::ImageLayout::eGeneral,
                             regions, vk::Filter::eNearest);
 
-    memoryBarrier.setSrcQueueFamilyIndex(copyVk->graphicsQueueFamily());
-    memoryBarrier.setDstQueueFamilyIndex(vk::QueueFamilyExternal);
+    vk::ImageMemoryBarrier2 sourceRelease = sourceAcquire;
+    sourceRelease.setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer);
+    sourceRelease.setSrcAccessMask(vk::AccessFlagBits2::eTransferRead);
+    sourceRelease.setDstStageMask(vk::PipelineStageFlagBits2::eNone);
+    sourceRelease.setDstAccessMask(vk::AccessFlags2{});
+    sourceRelease.setSrcQueueFamilyIndex(copyVk->graphicsQueueFamily());
+    sourceRelease.setDstQueueFamilyIndex(vk::QueueFamilyExternal);
+    vk::ImageMemoryBarrier2 destinationRelease = destinationAcquire;
+    destinationRelease.setSrcStageMask(vk::PipelineStageFlagBits2::eTransfer);
+    destinationRelease.setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite);
+    destinationRelease.setDstStageMask(vk::PipelineStageFlagBits2::eNone);
+    destinationRelease.setDstAccessMask(vk::AccessFlags2{});
+    destinationRelease.setSrcQueueFamilyIndex(copyVk->graphicsQueueFamily());
+    destinationRelease.setDstQueueFamilyIndex(vk::QueueFamilyExternal);
+    const std::array releaseBarriers{sourceRelease, destinationRelease};
     commandBuffer.pipelineBarrier2(vk::DependencyInfo{
         vk::DependencyFlags{},
         {},
         {},
-        memoryBarrier,
+        releaseBarriers,
     });
 
     if (query) {

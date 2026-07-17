@@ -4,6 +4,7 @@ target_sources(kwin PRIVATE
     x11_windowed_logging.cpp
     x11_windowed_output.cpp
     x11_windowed_qpainter_backend.cpp
+    x11_windowed_vulkan_backend.cpp
 )
 
 target_link_libraries(kwin

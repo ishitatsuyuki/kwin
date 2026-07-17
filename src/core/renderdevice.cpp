@@ -19,6 +19,7 @@
 
 #include <expected>
 #include <vulkan/vulkan_raii.hpp>
+#include <vulkan/vulkan_to_string.hpp>
 #if __has_include(<sys/sysmacros.h>)
 #include <sys/sysmacros.h>
 #endif
@@ -27,6 +28,10 @@ namespace KWin
 {
 
 static const bool s_disableVulkan = environmentVariableBoolValue("KWIN_DISABLE_VULKAN").value_or(false);
+// Diagnostic override for comparing async compute against running the same
+// compositor workload on the graphics queue. The default remains to prefer a
+// compute-only queue.
+static const bool s_forceVulkanGraphicsQueue = environmentVariableBoolValue("KWIN_VULKAN_FORCE_GRAPHICS_QUEUE").value_or(false);
 
 // NOTE that we have to create an instance per render device, as Mesa
 // only updates the list of devices on the first vkEnumeratePhysicalDevices
@@ -66,6 +71,18 @@ static vk::raii::Instance createVulkanInstance(const vk::raii::Context &context)
     return std::move(instance);
 }
 
+class RenderDevicePrivate
+{
+public:
+    RenderDevicePrivate()
+        : instance(createVulkanInstance(context))
+    {
+    }
+
+    vk::raii::Context context;
+    vk::raii::Instance instance;
+};
+
 static FormatModifierMap getImportFormats(EglDisplay *eglDisplay, VulkanDevice *vulkanDevice)
 {
     FormatModifierMap ret;
@@ -81,7 +98,7 @@ static FormatModifierMap getImportFormats(EglDisplay *eglDisplay, VulkanDevice *
 RenderDevice::RenderDevice(std::unique_ptr<DrmDevice> &&device, std::unique_ptr<EglDisplay> &&display)
     : m_device(std::move(device))
     , m_display(std::move(display))
-    , m_vulkanInstance(createVulkanInstance(m_vulkanContext))
+    , m_vulkan(std::make_unique<RenderDevicePrivate>())
 {
     createVulkanDevice();
     m_allImportableFormats = getImportFormats(m_display.get(), m_vulkanDevice.get());
@@ -199,17 +216,75 @@ static std::unique_ptr<VulkanDevice> openVulkanDevice(const vk::raii::Instance &
         const bool hasGraphics = std::ranges::any_of(queueProperties, [](const vk::QueueFamilyProperties &props) {
             return bool(props.queueFlags & vk::QueueFlagBits::eGraphics);
         });
-        if (!hasGraphics) {
-            qCWarning(KWIN_VULKAN, "Physical device %s has no graphics queue", deviceName);
+        const bool hasCompute = std::ranges::any_of(queueProperties, [](const vk::QueueFamilyProperties &props) {
+            return bool(props.queueFlags & vk::QueueFlagBits::eCompute);
+        });
+        if (!hasGraphics || !hasCompute) {
+            qCWarning(KWIN_VULKAN, "Physical device %s has no graphics or compute queue", deviceName);
+            continue;
+        }
+        const auto supportedFeatureChain = physicalDevice.getFeatures2<vk::PhysicalDeviceFeatures2,
+                                                                       vk::PhysicalDeviceHostQueryResetFeatures>();
+        const vk::PhysicalDeviceFeatures supportedFeatures = supportedFeatureChain.get<vk::PhysicalDeviceFeatures2>().features;
+        const bool supportsHostQueryReset = supportedFeatureChain.get<vk::PhysicalDeviceHostQueryResetFeatures>().hostQueryReset;
+        if (!supportedFeatures.shaderStorageImageWriteWithoutFormat) {
+            qCWarning(KWIN_VULKAN, "Physical device %s can't write storage images without a format", deviceName);
+            continue;
+        }
+        if (!supportedFeatures.shaderStorageImageReadWithoutFormat) {
+            qCWarning(KWIN_VULKAN, "Physical device %s can't read storage images without a format", deviceName);
+            continue;
+        }
+        if (!supportedFeatures.shaderSampledImageArrayDynamicIndexing) {
+            qCWarning(KWIN_VULKAN, "Physical device %s doesn't support dynamic sampled-image array indexing", deviceName);
             continue;
         }
 
+        const auto graphicsIt = std::ranges::find_if(queueProperties, [](const vk::QueueFamilyProperties &props) {
+            return bool(props.queueFlags & vk::QueueFlagBits::eGraphics);
+        });
+        auto computeIt = s_forceVulkanGraphicsQueue && (graphicsIt->queueFlags & vk::QueueFlagBits::eCompute)
+            ? graphicsIt
+            : std::ranges::find_if(queueProperties, [](const vk::QueueFamilyProperties &props) {
+            return (props.queueFlags & vk::QueueFlagBits::eCompute) && !(props.queueFlags & vk::QueueFlagBits::eGraphics);
+        });
+        if (computeIt == queueProperties.end()) {
+            computeIt = std::ranges::find_if(queueProperties, [](const vk::QueueFamilyProperties &props) {
+                return bool(props.queueFlags & vk::QueueFlagBits::eCompute);
+            });
+        }
+        const uint32_t computeQueueFamily = std::distance(queueProperties.begin(), computeIt);
+
+        const auto supportsExtension = [&extensionProps](std::string_view name) {
+            return std::ranges::any_of(extensionProps, [name](const vk::ExtensionProperties &extension) {
+                return std::string_view(extension.extensionName.data()) == name;
+            });
+        };
+        const char *globalPriorityExtensionName = nullptr;
+        if (supportsExtension(VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME)) {
+            globalPriorityExtensionName = VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME;
+        } else if (supportsExtension(VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME)) {
+            globalPriorityExtensionName = VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME;
+        }
+        const bool supportsGlobalPriority = globalPriorityExtensionName;
+        if (supportsGlobalPriority) {
+            usedExtensions.push_back(globalPriorityExtensionName);
+        }
+
         std::vector<VkDeviceQueueCreateInfo> queueInfo;
+        std::vector<VkDeviceQueueGlobalPriorityCreateInfoKHR> priorityInfo(queueProperties.size());
         float priority = 1;
         for (uint32_t i = 0; i < queueProperties.size(); i++) {
+            if (supportsGlobalPriority && i == computeQueueFamily) {
+                priorityInfo[i] = VkDeviceQueueGlobalPriorityCreateInfoKHR{
+                    .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR,
+                    .pNext = nullptr,
+                    .globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR,
+                };
+            }
             queueInfo.push_back(VkDeviceQueueCreateInfo{
                 .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                .pNext = nullptr,
+                .pNext = supportsGlobalPriority && i == computeQueueFamily ? &priorityInfo[i] : nullptr,
                 .flags = {},
                 .queueFamilyIndex = i,
                 .queueCount = 1,
@@ -217,10 +292,16 @@ static std::unique_ptr<VulkanDevice> openVulkanDevice(const vk::raii::Instance &
             });
         }
 
+        vk::PhysicalDeviceHostQueryResetFeatures hostQueryResetFeatures;
+        hostQueryResetFeatures.hostQueryReset = supportsHostQueryReset;
         vk::PhysicalDeviceSynchronization2Features syncFeatures;
+        syncFeatures.pNext = &hostQueryResetFeatures;
         syncFeatures.synchronization2 = true;
         VkPhysicalDeviceFeatures features{
             .robustBufferAccess = true,
+            .shaderStorageImageReadWithoutFormat = true,
+            .shaderStorageImageWriteWithoutFormat = true,
+            .shaderSampledImageArrayDynamicIndexing = true,
         };
         VkDeviceCreateInfo deviceInfo{
             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -236,6 +317,16 @@ static std::unique_ptr<VulkanDevice> openVulkanDevice(const vk::raii::Instance &
         };
 
         auto [result, logicalDevice] = physicalDevice.createDevice(deviceInfo);
+        bool hasHighPriorityComputeQueue = supportsGlobalPriority && result == vk::Result::eSuccess;
+        if (result != vk::Result::eSuccess && supportsGlobalPriority) {
+            qCWarning(KWIN_VULKAN, "High-priority compute queue creation for %s failed: %s; retrying with normal priority",
+                      deviceName, vk::to_string(result).c_str());
+            queueInfo[computeQueueFamily].pNext = nullptr;
+            auto fallback = physicalDevice.createDevice(deviceInfo);
+            result = fallback.result;
+            logicalDevice = std::move(fallback.value);
+            hasHighPriorityComputeQueue = false;
+        }
         if (result != vk::Result::eSuccess) {
             qCWarning(KWIN_VULKAN, "vkCreateDevice for %s failed: %s", deviceName, vk::to_string(vk::Result(result)).c_str());
             continue;
@@ -245,11 +336,22 @@ static std::unique_ptr<VulkanDevice> openVulkanDevice(const vk::raii::Instance &
             physicalDevice,
             std::move(logicalDevice),
             queueProperties | std::ranges::to<std::vector<VkQueueFamilyProperties>>(),
-            basicProperties.properties.deviceType);
+            basicProperties.properties.deviceType,
+            computeQueueFamily,
+            hasHighPriorityComputeQueue,
+            supportsHostQueryReset);
         if (ret->supportedFormats().isEmpty()) {
             continue;
         }
-        qCDebug(KWIN_VULKAN, "Found Vulkan device %s for %s", deviceName, qPrintable(drm->path()));
+        qCDebug(KWIN_VULKAN, "Found Vulkan device %s for %s (compute queue family %u%s%s)",
+                deviceName,
+                qPrintable(drm->path()),
+                computeQueueFamily,
+                ret->hasDedicatedComputeQueue() ? ", dedicated" : "",
+                ret->hasHighPriorityComputeQueue() ? ", high priority" : "");
+        if (s_forceVulkanGraphicsQueue) {
+            qCInfo(KWIN_VULKAN, "KWIN_VULKAN_FORCE_GRAPHICS_QUEUE is set; Vulkan compositor work will use the graphics queue");
+        }
         return ret;
     }
     qCDebug(KWIN_VULKAN, "No Vulkan device found for %s", qPrintable(drm->path()));
@@ -269,10 +371,10 @@ void RenderDevice::handleVulkanDeviceLoss()
 
 void RenderDevice::createVulkanDevice()
 {
-    if (!*m_vulkanInstance) {
+    if (!*m_vulkan->instance) {
         return;
     }
-    m_vulkanDevice = openVulkanDevice(m_vulkanInstance, m_device.get());
+    m_vulkanDevice = openVulkanDevice(m_vulkan->instance, m_device.get());
     if (m_vulkanDevice) {
         connect(m_vulkanDevice.get(), &VulkanDevice::deviceLost, this, &RenderDevice::handleVulkanDeviceLoss);
     }

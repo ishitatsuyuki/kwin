@@ -11,18 +11,15 @@
 #include <kwin_export.h>
 
 #include "core/rect.h"
-#include "core/region.h"
-#include "renderloop.h"
-#include "utils/edid.h"
 
-#include <QDebug>
 #include <QList>
-#include <QMatrix4x4>
 #include <QObject>
 #include <QSize>
 #include <QString>
 #include <QUuid>
 
+class QDebug;
+class QMatrix4x4;
 class TestXdgOutput;
 class TestWaylandOutput;
 
@@ -30,8 +27,10 @@ namespace KWin
 {
 
 class BackendOutput;
+class ColorDescription;
 class OutputChangeSet;
 class OutputMode;
+class Region;
 struct CustomModeDefinition;
 
 /**

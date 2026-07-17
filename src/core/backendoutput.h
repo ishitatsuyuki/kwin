@@ -8,7 +8,10 @@
 */
 #pragma once
 
+#include "core/colorspace.h"
+#include "effect/globals.h"
 #include "output.h"
+#include "utils/edid.h"
 
 class QJsonArray;
 

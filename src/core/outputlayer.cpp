@@ -5,6 +5,7 @@
 */
 
 #include "outputlayer.h"
+#include "core/renderloop.h"
 #include "scene/surfaceitem.h"
 #include "scene/surfaceitem_wayland.h"
 #include "wayland/surface.h"

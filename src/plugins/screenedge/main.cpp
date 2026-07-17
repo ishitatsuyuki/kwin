@@ -6,6 +6,8 @@
 
 #include "screenedgeeffect.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

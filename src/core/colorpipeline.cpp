@@ -95,6 +95,53 @@ ColorPipeline ColorPipeline::create(const std::shared_ptr<ColorDescription> &fro
     return ret;
 }
 
+ColorPipeline ColorPipeline::createIcc(const std::shared_ptr<IccProfile> &profile,
+                                       const std::shared_ptr<ColorDescription> &inputColor,
+                                       const Colorimetry &wireColor,
+                                       TransferFunction::Type wireTransfer,
+                                       RenderingIntent intent)
+{
+    Q_ASSERT(profile);
+    Q_ASSERT(inputColor);
+
+    const auto inputSpace = inputColor->transferFunction().type == TransferFunction::linear
+        ? ColorspaceType::LinearRGB
+        : ColorspaceType::NonLinearRGB;
+    ColorPipeline ret(ValueRange{0, 1}, inputSpace);
+    ret.addTransferFunction(inputColor->transferFunction(), ColorspaceType::LinearRGB);
+    const double normalizationLuminance = wireTransfer == TransferFunction::PerceptualQuantizer && profile->hasMHC2Tag()
+        ? 10'000
+        : inputColor->transferFunction().maxLuminance;
+    ret.addMultiplier(1.0 / normalizationLuminance);
+
+    const ColorDescription linearizedInput(inputColor->containerColorimetry(), TransferFunction(TransferFunction::linear, 0, 1), 1, 0, 1, 1);
+    const ColorDescription linearizedProfile(profile->colorimetry(), TransferFunction(TransferFunction::linear, 0, 1), 1, 0, 1, 1);
+    if (const auto tag = profile->BToATag(intent); tag && profile->mhc2Matrix().isIdentity()) {
+        QMatrix4x4 toXYZD50;
+        if (intent == RenderingIntent::AbsoluteColorimetricNoAdaptation) {
+            const QMatrix4x4 toLinearDisplay = linearizedInput.toOther(linearizedProfile, RenderingIntent::AbsoluteColorimetricNoAdaptation);
+            const QMatrix4x4 toXYZ = linearizedProfile.toOther(IccProfile::s_connectionSpace, RenderingIntent::RelativeColorimetric);
+            toXYZD50 = toXYZ * toLinearDisplay;
+        } else {
+            toXYZD50 = linearizedInput.toOther(IccProfile::s_connectionSpace, intent);
+        }
+        toXYZD50 = IccProfile::s_connectionSpace.containerColorimetry().toXYZ() * toXYZD50;
+        ret.addMatrix(toXYZD50, ValueRange{0, 1}, ColorspaceType::AnyNonRGB);
+        ret.add(*tag);
+    } else if (profile->hasMHC2Tag()) {
+        const QMatrix4x4 calibration = wireColor.fromXYZ() * profile->mhc2Matrix() * inputColor->containerColorimetry().toXYZ();
+        ret.addMatrix(calibration, ValueRange{0, 1}, ColorspaceType::LinearRGB);
+        ret.addInverseTransferFunction(TransferFunction(wireTransfer, 0, 1), ColorspaceType::NonLinearRGB);
+    } else {
+        ret.addMatrix(linearizedInput.toOther(linearizedProfile, intent), ValueRange{0, 1}, ColorspaceType::LinearRGB);
+        ret.add1DLUT(profile->inverseTransferFunction(), ColorspaceType::NonLinearRGB);
+    }
+    if (const auto vcgt = profile->vcgt()) {
+        ret.add1DLUT(vcgt, ColorspaceType::NonLinearRGB);
+    }
+    return ret;
+}
+
 ColorPipeline::ColorPipeline()
     : inputRange(ValueRange{
           .min = 0,

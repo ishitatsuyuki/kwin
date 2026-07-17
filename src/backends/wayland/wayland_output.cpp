@@ -16,6 +16,7 @@
 #include "wayland-client/viewporter.h"
 #include "wayland_backend.h"
 #include "wayland_display.h"
+#include "wayland_explicit_sync.h"
 #include "wayland_layer.h"
 
 #include <KWayland/Client/compositor.h>
@@ -50,6 +51,7 @@ using namespace KWayland::Client;
 WaylandCursor::WaylandCursor(WaylandBackend *backend)
     : m_surface(backend->display()->compositor()->createSurface())
     , m_viewport(backend->display()->viewporter()->createViewport(*m_surface))
+    , m_explicitSync(std::make_unique<WaylandExplicitSync>(backend, *m_surface))
 {
 }
 
@@ -81,15 +83,18 @@ void WaylandCursor::setEnabled(bool enable)
     }
 }
 
-void WaylandCursor::update(wl_buffer *buffer, const QSize &logicalSize, const QPoint &hotspot)
+void WaylandCursor::update(wl_buffer *buffer,
+                           const QSize &logicalSize,
+                           const QPoint &hotspot,
+                           GraphicsBuffer *graphicsBuffer,
+                           FileDescriptor &&acquireFence)
 {
-    if (m_buffer != buffer || m_size != logicalSize || m_hotspot != hotspot) {
-        m_buffer = buffer;
-        m_size = logicalSize;
-        m_hotspot = hotspot;
-
-        sync();
-    }
+    m_buffer = buffer;
+    m_size = logicalSize;
+    m_hotspot = hotspot;
+    m_graphicsBuffer = graphicsBuffer;
+    m_acquireFence = std::move(acquireFence);
+    sync();
 }
 
 void WaylandCursor::sync()
@@ -101,6 +106,7 @@ void WaylandCursor::sync()
         m_viewport->setDestination(m_size);
         m_surface->attachBuffer(m_buffer);
         m_surface->damageBuffer(QRect(0, 0, INT32_MAX, INT32_MAX));
+        m_explicitSync->setAcquireReleasePoints(m_graphicsBuffer, std::move(m_acquireFence));
         m_surface->commit(KWayland::Client::Surface::CommitFlag::None);
     }
 

@@ -9,6 +9,7 @@
 
 #include <KConfigGroup>
 #include <KConfigLoader>
+#include <KPluginMetaData>
 
 #include <QFile>
 

@@ -10,10 +10,32 @@
 #include "vulkan_device.h"
 #include "vulkan_logging.h"
 
+#include <cerrno>
+#include <sys/poll.h>
 #include <utility>
+#include <vulkan/vulkan_to_string.hpp>
 
 namespace KWin
 {
+
+static bool waitForSubmission(const std::optional<FileDescriptor> &completion)
+{
+    if (!completion) {
+        return false;
+    }
+
+    pollfd pfd{
+        .fd = completion->get(),
+        .events = POLLIN,
+        .revents = 0,
+    };
+    int ret;
+    do {
+        ret = poll(&pfd, 1, -1);
+    } while (ret < 0 && errno == EINTR);
+
+    return ret == 1 && (pfd.revents & POLLIN);
+}
 
 std::optional<vk::Format> VulkanTexture::qImageToVulkanFormat(QImage::Format format)
 {
@@ -48,17 +70,26 @@ std::optional<vk::Format> VulkanTexture::qImageToVulkanFormat(QImage::Format for
 }
 
 VulkanTexture::VulkanTexture(VulkanDevice *device, vk::Format format, vk::raii::Image &&image,
-                             std::vector<vk::raii::DeviceMemory> &&memory, const QSize &size)
+                             std::vector<vk::raii::DeviceMemory> &&memory, const QSize &size,
+                             VulkanQueueRole queueRole, bool external)
     : m_device(device)
     , m_format(format)
     , m_memory(std::move(memory))
     , m_image(std::move(image))
     , m_size(size)
+    , m_queueRole(queueRole)
+    , m_external(external)
 {
+    m_deviceLostConnection = QObject::connect(device, &VulkanDevice::deviceLost, device, [this]() {
+        m_image.clear();
+        m_memory.clear();
+        m_device = nullptr;
+    });
 }
 
 VulkanTexture::~VulkanTexture()
 {
+    QObject::disconnect(m_deviceLostConnection);
 }
 
 QSize VulkanTexture::size() const
@@ -74,6 +105,16 @@ const vk::raii::Image &VulkanTexture::handle() const
 vk::Format VulkanTexture::format() const
 {
     return m_format;
+}
+
+VulkanQueueRole VulkanTexture::queueRole() const
+{
+    return m_queueRole;
+}
+
+bool VulkanTexture::isExternal() const
+{
+    return m_external;
 }
 
 static QImage::Format vulkanToQImageFormat(vk::Format format)
@@ -94,6 +135,9 @@ static QImage::Format vulkanToQImageFormat(vk::Format format)
 
 QImage VulkanTexture::download() const
 {
+    if (!m_device || !*m_image) {
+        return {};
+    }
     const QImage::Format qFormat = vulkanToQImageFormat(m_format);
     if (qFormat == QImage::Format_Invalid) {
         qCWarning(KWIN_VULKAN) << "Unsupported format for download:" << vk::to_string(m_format);
@@ -104,7 +148,12 @@ QImage VulkanTexture::download() const
     const uint32_t bytesPerPixel = result.depth() / 8;
     const vk::DeviceSize bufferSize = m_size.width() * m_size.height() * bytesPerPixel;
 
-    m_device->waitIdle();
+    // Concurrent and imported images may most recently have been used by a
+    // different queue. The regular Graphics and Compute cases are ordered by
+    // submission on their respective queue and don't need a device-wide wait.
+    if (m_queueRole == VulkanQueueRole::Concurrent || m_external) {
+        m_device->waitIdle();
+    }
 
     vk::BufferCreateInfo bufferInfo{
         vk::BufferCreateFlags(),
@@ -121,8 +170,26 @@ QImage VulkanTexture::download() const
     }
     stagingBuffer.bindMemory(stagingMemory, 0);
 
-    auto commandBuffer = m_device->createCommandBuffer();
+    auto commandBuffer = m_queueRole == VulkanQueueRole::Compute ? m_device->createComputeCommandBuffer() : m_device->createCommandBuffer();
     commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+    const uint32_t queueFamily = m_queueRole == VulkanQueueRole::Compute
+        ? m_device->computeQueueFamily()
+        : m_device->graphicsQueueFamily();
+    if (m_external) {
+        const vk::ImageMemoryBarrier2 acquireBarrier{
+            vk::PipelineStageFlagBits2::eNone,
+            vk::AccessFlags2{},
+            vk::PipelineStageFlagBits2::eTransfer,
+            vk::AccessFlagBits2::eTransferRead,
+            vk::ImageLayout::eGeneral,
+            vk::ImageLayout::eGeneral,
+            vk::QueueFamilyExternal,
+            queueFamily,
+            *m_image,
+            vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        commandBuffer.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, acquireBarrier});
+    }
     vk::BufferImageCopy2 copyRegion{
         0,
         uint32_t(m_size.width()),
@@ -142,10 +209,29 @@ QImage VulkanTexture::download() const
         *stagingBuffer,
         copyRegion,
     });
+    if (m_external) {
+        const vk::ImageMemoryBarrier2 releaseBarrier{
+            vk::PipelineStageFlagBits2::eTransfer,
+            vk::AccessFlagBits2::eTransferRead,
+            vk::PipelineStageFlagBits2::eNone,
+            vk::AccessFlags2{},
+            vk::ImageLayout::eGeneral,
+            vk::ImageLayout::eGeneral,
+            queueFamily,
+            vk::QueueFamilyExternal,
+            *m_image,
+            vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        commandBuffer.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, releaseBarrier});
+    }
     commandBuffer.end();
 
-    m_device->submit(std::move(commandBuffer), FileDescriptor{});
-    m_device->waitIdle();
+    const auto completion = m_queueRole == VulkanQueueRole::Compute
+        ? m_device->submitCompute(std::move(commandBuffer), FileDescriptor{})
+        : m_device->submit(std::move(commandBuffer), FileDescriptor{});
+    if (!waitForSubmission(completion)) {
+        return {};
+    }
 
     // use mapMemory/unmapMemory (Vulkan 1.0) instead of mapMemory2/unmapMemory2 (Vulkan 1.4)
     // for compatibility with lavapipe and other drivers that don't support 1.4
@@ -162,12 +248,12 @@ QImage VulkanTexture::download() const
 
 bool VulkanTexture::update(const QImage &img, const Region &region, const QPoint &offset)
 {
-    if (img.size() != m_size || qImageToVulkanFormat(img.format()) != m_format) {
+    if (!m_device || !*m_image || img.size() != m_size || qImageToVulkanFormat(img.format()) != m_format) {
         return false;
     }
-    // FIXME this is terrible. Instead, pass the command buffer in as
-    // an argument, and leave synchronization up to the caller?
-    m_device->waitIdle();
+    if (m_queueRole == VulkanQueueRole::Concurrent || m_external) {
+        m_device->waitIdle();
+    }
 
     vk::BufferCreateInfo bufferInfo{
         vk::BufferCreateFlags(),
@@ -190,8 +276,26 @@ bool VulkanTexture::update(const QImage &img, const Region &region, const QPoint
     std::memcpy(dataPtr, img.constBits(), img.sizeInBytes());
     stagingMemory.unmapMemory();
 
-    auto commandBuffer = m_device->createCommandBuffer();
+    auto commandBuffer = m_queueRole == VulkanQueueRole::Compute ? m_device->createComputeCommandBuffer() : m_device->createCommandBuffer();
     commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+    const uint32_t queueFamily = m_queueRole == VulkanQueueRole::Compute
+        ? m_device->computeQueueFamily()
+        : m_device->graphicsQueueFamily();
+    if (m_external) {
+        const vk::ImageMemoryBarrier2 acquireBarrier{
+            vk::PipelineStageFlagBits2::eNone,
+            vk::AccessFlags2{},
+            vk::PipelineStageFlagBits2::eTransfer,
+            vk::AccessFlagBits2::eTransferWrite,
+            vk::ImageLayout::eGeneral,
+            vk::ImageLayout::eGeneral,
+            vk::QueueFamilyExternal,
+            queueFamily,
+            *m_image,
+            vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        commandBuffer.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, acquireBarrier});
+    }
     const uint32_t bytesPerPixel = img.depth() / 8;
     const auto regions = region.rects() | std::views::transform([&img, &offset, bytesPerPixel](const Rect &rect) {
         return vk::BufferImageCopy2{
@@ -214,11 +318,26 @@ bool VulkanTexture::update(const QImage &img, const Region &region, const QPoint
         vk::ImageLayout::eGeneral,
         regions,
     });
+    if (m_external) {
+        const vk::ImageMemoryBarrier2 releaseBarrier{
+            vk::PipelineStageFlagBits2::eTransfer,
+            vk::AccessFlagBits2::eTransferWrite,
+            vk::PipelineStageFlagBits2::eNone,
+            vk::AccessFlags2{},
+            vk::ImageLayout::eGeneral,
+            vk::ImageLayout::eGeneral,
+            queueFamily,
+            vk::QueueFamilyExternal,
+            *m_image,
+            vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        commandBuffer.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, releaseBarrier});
+    }
     commandBuffer.end();
-    m_device->submit(std::move(commandBuffer), FileDescriptor{});
-
-    m_device->waitIdle();
-    return true;
+    const auto completion = m_queueRole == VulkanQueueRole::Compute
+        ? m_device->submitCompute(std::move(commandBuffer), FileDescriptor{})
+        : m_device->submit(std::move(commandBuffer), FileDescriptor{});
+    return waitForSubmission(completion);
 }
 
 bool VulkanTexture::update(const QImage &img)
@@ -226,7 +345,8 @@ bool VulkanTexture::update(const QImage &img)
     return update(img, Region(0, 0, img.width(), img.height()));
 }
 
-std::unique_ptr<VulkanTexture> VulkanTexture::allocate(VulkanDevice *device, vk::Format format, const QSize &size, vk::ImageUsageFlags usage)
+std::unique_ptr<VulkanTexture> VulkanTexture::allocate(VulkanDevice *device, vk::Format format, const QSize &size, vk::ImageUsageFlags usage,
+                                                       VulkanQueueRole queueRole)
 {
     vk::ImageCreateInfo info{
         vk::ImageCreateFlags(),
@@ -255,7 +375,7 @@ std::unique_ptr<VulkanTexture> VulkanTexture::allocate(VulkanDevice *device, vk:
 
     // we will only use the general image layout everywhere else,
     // so transition the image here once and then never again.
-    auto commandBuffer = device->createCommandBuffer();
+    auto commandBuffer = queueRole == VulkanQueueRole::Compute ? device->createComputeCommandBuffer() : device->createCommandBuffer();
     commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
     vk::ImageMemoryBarrier toTransferSrc{
         vk::AccessFlags{},
@@ -267,26 +387,28 @@ std::unique_ptr<VulkanTexture> VulkanTexture::allocate(VulkanDevice *device, vk:
         *image,
         vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     };
-    commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, toTransferSrc);
+    commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, toTransferSrc);
     commandBuffer.end();
-    device->submit(std::move(commandBuffer), FileDescriptor{});
-
-    // FIXME this is terrible. Instead, pass the command buffer in as
-    // an argument, and leave synchronization up to the caller.
-    device->waitIdle();
+    const auto completion = queueRole == VulkanQueueRole::Compute
+        ? device->submitCompute(std::move(commandBuffer), FileDescriptor{})
+        : device->submit(std::move(commandBuffer), FileDescriptor{});
+    if (!waitForSubmission(completion)) {
+        return nullptr;
+    }
 
     std::vector<vk::raii::DeviceMemory> mem;
     mem.push_back(std::move(memory));
-    return std::make_unique<VulkanTexture>(device, format, std::move(image), std::move(mem), size);
+    return std::make_unique<VulkanTexture>(device, format, std::move(image), std::move(mem), size, queueRole);
 }
 
-std::unique_ptr<VulkanTexture> VulkanTexture::upload(VulkanDevice *device, const QImage &image, vk::ImageUsageFlags usage)
+std::unique_ptr<VulkanTexture> VulkanTexture::upload(VulkanDevice *device, const QImage &image, vk::ImageUsageFlags usage,
+                                                     VulkanQueueRole queueRole)
 {
     const auto format = qImageToVulkanFormat(image.format());
     if (!format) {
         return nullptr;
     }
-    auto ret = allocate(device, *format, image.size(), usage);
+    auto ret = allocate(device, *format, image.size(), usage, queueRole);
     if (!ret) {
         return nullptr;
     }

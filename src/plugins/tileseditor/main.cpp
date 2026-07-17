@@ -6,6 +6,8 @@
 
 #include "tileseditoreffect.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

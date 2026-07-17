@@ -6,6 +6,8 @@
 
 #include "fallapart.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

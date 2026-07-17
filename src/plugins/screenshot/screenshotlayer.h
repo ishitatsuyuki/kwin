@@ -9,12 +9,10 @@
 namespace KWin
 {
 
-class GLFramebuffer;
-
 class ScreenshotLayer : public OutputLayer
 {
 public:
-    explicit ScreenshotLayer(LogicalOutput *output, GLFramebuffer *buffer);
+    explicit ScreenshotLayer(LogicalOutput *output, const RenderTarget &renderTarget);
 
     DrmDevice *scanoutDevice() const override;
     FormatModifierMap supportedDrmFormats() const override;
@@ -24,7 +22,7 @@ private:
     std::optional<OutputLayerBeginFrameInfo> doBeginFrame() override;
     bool doEndFrame(const Region &renderedRegion, const Region &damagedRegion, OutputFrame *frame) override;
 
-    GLFramebuffer *const m_buffer;
+    const RenderTarget m_renderTarget;
 };
 
 }

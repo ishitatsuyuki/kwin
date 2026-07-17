@@ -14,60 +14,82 @@
 
 #include <QDebug>
 #include <sys/stat.h>
+#include <vulkan/vulkan_to_string.hpp>
 
 namespace KWin
 {
 
 VulkanDevice::VulkanDevice(vk::raii::PhysicalDevice physicalDevice, vk::raii::Device &&logicalDevice,
-                           std::vector<VkQueueFamilyProperties> &&queueProperties, vk::PhysicalDeviceType type)
+                           std::vector<VkQueueFamilyProperties> &&queueProperties, vk::PhysicalDeviceType type,
+                           uint32_t computeQueueFamily, bool highPriorityComputeQueue, bool hostQueryReset)
     : m_type(type)
     , m_physical(physicalDevice)
     , m_logical(std::move(logicalDevice))
     // TODO it might be useful to have separate lists for sample + transfer_src
     // and sample + color attachment + transfer_dst
     , m_formats(queryFormats(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+    , m_computeOutputFormats(queryFormats(VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
     , m_queueProperties(std::move(queueProperties))
     , m_graphicsQueue(nullptr)
-    , m_commandPool(nullptr)
+    , m_computeQueue(nullptr)
+    , m_graphicsCommandPool(nullptr)
+    , m_computeCommandPool(nullptr)
+    , m_computeQueueFamilyIndex(computeQueueFamily)
     , m_deviceLimits(m_physical.getProperties().limits)
+    , m_highPriorityComputeQueue(highPriorityComputeQueue)
+    , m_hostQueryReset(hostQueryReset)
 {
     m_memoryProperties = physicalDevice.getMemoryProperties();
-    getQueue();
-    createCommandPool();
+    getQueues();
+    createCommandPools();
 }
 
 VulkanDevice::~VulkanDevice()
 {
     Q_EMIT deviceLost();
     m_graphicsQueue.waitIdle();
+    if (*m_computeQueue != *m_graphicsQueue) {
+        m_computeQueue.waitIdle();
+    }
     m_importedTextures.clear();
-    m_submittedCommandBuffers.clear();
-    m_commandPool.clear();
+    m_graphicsSubmissions.clear();
+    m_computeSubmissions.clear();
+    m_graphicsCommandPool.clear();
+    m_computeCommandPool.clear();
     m_logical.clear();
 }
 
-void VulkanDevice::getQueue()
+void VulkanDevice::getQueues()
 {
-    auto it = std::ranges::find_if(m_queueProperties, [](const VkQueueFamilyProperties &props) {
+    const auto graphicsIt = std::ranges::find_if(m_queueProperties, [](const VkQueueFamilyProperties &props) {
         return props.queueFlags & VK_QUEUE_GRAPHICS_BIT;
     });
-    Q_ASSERT(it != m_queueProperties.end());
-    m_queueFamilyIndex = std::distance(m_queueProperties.begin(), it);
-    m_graphicsQueue = m_logical.getQueue(m_queueFamilyIndex, 0);
+    Q_ASSERT(graphicsIt != m_queueProperties.end());
+    m_graphicsQueueFamilyIndex = std::distance(m_queueProperties.begin(), graphicsIt);
+    m_graphicsQueue = m_logical.getQueue(m_graphicsQueueFamilyIndex, 0);
+
+    Q_ASSERT(m_computeQueueFamilyIndex < m_queueProperties.size());
+    Q_ASSERT(m_queueProperties[m_computeQueueFamilyIndex].queueFlags & VK_QUEUE_COMPUTE_BIT);
+    m_computeQueue = m_logical.getQueue(m_computeQueueFamilyIndex, 0);
 }
 
-void VulkanDevice::createCommandPool()
+static vk::raii::CommandPool createCommandPool(const vk::raii::Device &device, uint32_t queueFamily)
 {
-    // only one queue for now -> also only one command pool
-    auto [result, cmdPool] = m_logical.createCommandPool(vk::CommandPoolCreateInfo{
+    auto [result, commandPool] = device.createCommandPool(vk::CommandPoolCreateInfo{
         vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
-        m_queueFamilyIndex,
+        queueFamily,
     });
     if (result != vk::Result::eSuccess) {
         qCCritical(KWIN_VULKAN) << "creating a command pool failed:" << vk::to_string(result);
-        return;
+        return nullptr;
     }
-    m_commandPool = std::move(cmdPool);
+    return std::move(commandPool);
+}
+
+void VulkanDevice::createCommandPools()
+{
+    m_graphicsCommandPool = createCommandPool(m_logical, m_graphicsQueueFamilyIndex);
+    m_computeCommandPool = createCommandPool(m_logical, m_computeQueueFamilyIndex);
 }
 
 std::shared_ptr<VulkanTexture> VulkanDevice::importBuffer(GraphicsBuffer *buffer, VkImageUsageFlags usage)
@@ -77,17 +99,52 @@ std::shared_ptr<VulkanTexture> VulkanDevice::importBuffer(GraphicsBuffer *buffer
     }
     auto it = m_importedTextures.find(buffer);
     if (it != m_importedTextures.end()) {
-        return it.value();
+        for (const ImportedTexture &imported : it.value()) {
+            if (imported.plane == -1 && (usage & ~imported.usage) == 0) {
+                return imported.texture;
+            }
+        }
     }
     auto ret = importDmabuf(buffer->dmabufAttributes(), usage);
     if (!ret) {
         return nullptr;
     }
-    m_importedTextures[buffer] = ret;
-    connect(buffer, &QObject::destroyed, this, [this, buffer]() {
-        m_importedTextures.remove(buffer);
-    });
+    const bool firstImport = it == m_importedTextures.end();
+    m_importedTextures[buffer].push_back(ImportedTexture{usage, -1, ret});
+    if (firstImport) {
+        connect(buffer, &QObject::destroyed, this, [this, buffer]() {
+            m_importedTextures.remove(buffer);
+        });
+    }
     return ret;
+}
+
+std::shared_ptr<VulkanTexture> VulkanDevice::importBufferPlane(GraphicsBuffer *buffer, uint32_t plane, uint32_t drmFormat, const QSize &size, VkImageUsageFlags usage)
+{
+    const DmaBufAttributes *attributes = buffer->dmabufAttributes();
+    if (!attributes || plane >= uint32_t(attributes->planeCount) || size.isEmpty()) {
+        return nullptr;
+    }
+    auto it = m_importedTextures.find(buffer);
+    if (it != m_importedTextures.end()) {
+        for (const ImportedTexture &imported : it.value()) {
+            if (imported.plane == int(plane) && (usage & ~imported.usage) == 0) {
+                return imported.texture;
+            }
+        }
+    }
+    auto texture = importDmabuf(attributes, usage, int(plane), drmFormat, size);
+    if (!texture) {
+        return nullptr;
+    }
+    const bool firstImport = it == m_importedTextures.end();
+    m_importedTextures[buffer].push_back(ImportedTexture{usage, int(plane), texture});
+    if (firstImport) {
+        connect(buffer, &QObject::destroyed, this, [this, buffer]() {
+            m_importedTextures.remove(buffer);
+        });
+    }
+    return texture;
 }
 
 /**
@@ -117,28 +174,35 @@ static bool isDisjoint(const DmaBufAttributes &attributes)
     return false;
 }
 
-std::shared_ptr<VulkanTexture> VulkanDevice::importDmabuf(const DmaBufAttributes *attributes, VkImageUsageFlags usage)
+std::shared_ptr<VulkanTexture> VulkanDevice::importDmabuf(const DmaBufAttributes *attributes, VkImageUsageFlags usage,
+                                                          int plane, uint32_t planeFormat, const QSize &planeSize)
 {
-    const auto format = FormatInfo::get(attributes->format);
+    const bool planeImport = plane >= 0;
+    const uint32_t drmFormat = planeImport ? planeFormat : attributes->format;
+    const auto format = FormatInfo::get(drmFormat);
     if (!format) {
         qCWarning(KWIN_VULKAN, "Dmabuf has unknown format");
         return nullptr;
     }
-    auto formatIt = m_formats.find(attributes->format);
+    auto formatIt = m_formats.find(drmFormat);
     if (formatIt == m_formats.end() || !formatIt->contains(attributes->modifier)) {
         if (formatIt == m_formats.end()) {
-            qCWarning(KWIN_VULKAN, "Dmabuf has unsupported format %s", qPrintable(FormatInfo::drmFormatName(attributes->format)));
+            qCWarning(KWIN_VULKAN, "Dmabuf has unsupported format %s", qPrintable(FormatInfo::drmFormatName(drmFormat)));
             for (auto it = m_formats.begin(); it != m_formats.end(); it++) {
                 qCWarning(KWIN_VULKAN, "Supported fmt: %s", qPrintable(FormatInfo::drmFormatName(it.key())));
             }
         } else {
-            qCWarning(KWIN_VULKAN, "Dmabuf has unsupported modifier for format %s", qPrintable(FormatInfo::drmFormatName(attributes->format)));
+            qCWarning(KWIN_VULKAN, "Dmabuf has unsupported modifier for format %s", qPrintable(FormatInfo::drmFormatName(drmFormat)));
         }
         return nullptr;
     }
     std::vector<vk::SubresourceLayout> subLayouts;
-    for (int i = 0; i < attributes->planeCount; i++) {
-        subLayouts.emplace_back(attributes->offset[i], 0, attributes->pitch[i], 0, 0);
+    if (planeImport) {
+        subLayouts.emplace_back(attributes->offset[plane], 0, attributes->pitch[plane], 0, 0);
+    } else {
+        for (int i = 0; i < attributes->planeCount; i++) {
+            subLayouts.emplace_back(attributes->offset[i], 0, attributes->pitch[i], 0, 0);
+        }
     }
     vk::ImageDrmFormatModifierExplicitCreateInfoEXT modifierInfo{
         attributes->modifier,
@@ -148,19 +212,25 @@ std::shared_ptr<VulkanTexture> VulkanDevice::importDmabuf(const DmaBufAttributes
         vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT,
         &modifierInfo,
     };
-    const bool disjoint = isDisjoint(*attributes);
+    const bool disjoint = !planeImport && isDisjoint(*attributes);
+    std::vector<uint32_t> queueFamilies;
+    if (m_graphicsQueueFamilyIndex != m_computeQueueFamilyIndex) {
+        queueFamilies = {m_graphicsQueueFamilyIndex, m_computeQueueFamilyIndex};
+    }
     vk::ImageCreateInfo imageInfo{
         disjoint ? vk::ImageCreateFlagBits::eDisjoint : vk::ImageCreateFlags(),
         vk::ImageType::e2D,
         vk::Format(format->vulkanFormat),
-        vk::Extent3D(attributes->width, attributes->height, 1),
+        vk::Extent3D(planeImport ? planeSize.width() : attributes->width,
+                     planeImport ? planeSize.height() : attributes->height,
+                     1),
         1,
         1,
         vk::SampleCountFlagBits::e1,
         vk::ImageTiling::eDrmFormatModifierEXT,
         vk::ImageUsageFlags(usage),
-        vk::SharingMode::eExclusive,
-        m_queueFamilyIndex,
+        queueFamilies.empty() ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent,
+        queueFamilies,
         vk::ImageLayout::eUndefined,
         &externalInfo,
     };
@@ -178,7 +248,7 @@ std::shared_ptr<VulkanTexture> VulkanDevice::importDmabuf(const DmaBufAttributes
 
     std::array<FileDescriptor, 4> duplicatedFds;
     for (size_t i = 0; i < memoryCount; i++) {
-        duplicatedFds[i] = attributes->fd[i].duplicate();
+        duplicatedFds[i] = attributes->fd[planeImport ? plane : int(i)].duplicate();
     }
 
     for (uint32_t i = 0; i < memoryCount; i++) {
@@ -242,8 +312,13 @@ std::shared_ptr<VulkanTexture> VulkanDevice::importDmabuf(const DmaBufAttributes
     for (FileDescriptor &fd : duplicatedFds) {
         fd.take();
     }
-    return std::make_shared<VulkanTexture>(this, vk::Format(format->vulkanFormat), std::move(image),
-                                           std::move(deviceMemory), QSize(attributes->width, attributes->height));
+    return std::make_shared<VulkanTexture>(this,
+                                           vk::Format(format->vulkanFormat),
+                                           std::move(image),
+                                           std::move(deviceMemory),
+                                           planeImport ? planeSize : QSize(attributes->width, attributes->height),
+                                           queueFamilies.empty() ? VulkanQueueRole::Graphics : VulkanQueueRole::Concurrent,
+                                           true);
 }
 
 FormatModifierMap VulkanDevice::queryFormats(VkImageUsageFlags flags) const
@@ -342,6 +417,11 @@ const FormatModifierMap &VulkanDevice::supportedFormats() const
     return m_formats;
 }
 
+const FormatModifierMap &VulkanDevice::computeOutputFormats() const
+{
+    return m_computeOutputFormats;
+}
+
 const vk::raii::Device &VulkanDevice::logicalDevice() const
 {
     return m_logical;
@@ -354,7 +434,32 @@ const vk::raii::Queue &VulkanDevice::graphicsQueue() const
 
 uint32_t VulkanDevice::graphicsQueueFamily() const
 {
-    return m_queueFamilyIndex;
+    return m_graphicsQueueFamilyIndex;
+}
+
+const vk::raii::Queue &VulkanDevice::computeQueue() const
+{
+    return m_computeQueue;
+}
+
+uint32_t VulkanDevice::computeQueueFamily() const
+{
+    return m_computeQueueFamilyIndex;
+}
+
+bool VulkanDevice::hasDedicatedComputeQueue() const
+{
+    return m_computeQueueFamilyIndex != m_graphicsQueueFamilyIndex;
+}
+
+bool VulkanDevice::hasHighPriorityComputeQueue() const
+{
+    return m_highPriorityComputeQueue;
+}
+
+bool VulkanDevice::hasHostQueryReset() const
+{
+    return m_hostQueryReset;
 }
 
 std::span<const VkQueueFamilyProperties> VulkanDevice::queueFamilyProperties() const
@@ -369,19 +474,29 @@ float VulkanDevice::nanosecondsPerQueryTick() const
 
 vk::raii::CommandBuffer VulkanDevice::createCommandBuffer()
 {
+    return createCommandBuffer(m_graphicsCommandPool, m_graphicsSubmissions);
+}
+
+vk::raii::CommandBuffer VulkanDevice::createComputeCommandBuffer()
+{
+    return createCommandBuffer(m_computeCommandPool, m_computeSubmissions);
+}
+
+vk::raii::CommandBuffer VulkanDevice::createCommandBuffer(vk::raii::CommandPool &pool, std::deque<SubmittedCommand> &submissions)
+{
     // clean up old command buffers first
-    for (auto it = m_submittedCommandBuffers.begin(); it != m_submittedCommandBuffers.end();) {
+    for (auto it = submissions.begin(); it != submissions.end();) {
         const SubmittedCommand &cmd = *it;
         // TODO use a QSocketNotifier per submission to do this asynchronously?
         if (cmd.completionSyncFd.isReadable()) {
-            it = m_submittedCommandBuffers.erase(it);
+            it = submissions.erase(it);
         } else {
             it++;
         }
     }
 
     auto [result, buffers] = m_logical.allocateCommandBuffers(vk::CommandBufferAllocateInfo{
-        m_commandPool,
+        pool,
         vk::CommandBufferLevel::ePrimary,
         1,
     });
@@ -419,6 +534,17 @@ std::optional<vk::raii::Semaphore> VulkanDevice::importSemaphore(FileDescriptor 
 
 std::optional<FileDescriptor> VulkanDevice::submit(vk::raii::CommandBuffer &&buffer, FileDescriptor &&syncFd)
 {
+    return submit(std::move(buffer), std::move(syncFd), m_graphicsQueue, m_graphicsSubmissions);
+}
+
+std::optional<FileDescriptor> VulkanDevice::submitCompute(vk::raii::CommandBuffer &&buffer, FileDescriptor &&syncFd)
+{
+    return submit(std::move(buffer), std::move(syncFd), m_computeQueue, m_computeSubmissions);
+}
+
+std::optional<FileDescriptor> VulkanDevice::submit(vk::raii::CommandBuffer &&buffer, FileDescriptor &&syncFd,
+                                                   const vk::raii::Queue &queue, std::deque<SubmittedCommand> &submissions)
+{
     vk::ExportFenceCreateInfo exportInfo{
         vk::ExternalFenceHandleTypeFlagBits::eSyncFd,
     };
@@ -436,13 +562,13 @@ std::optional<FileDescriptor> VulkanDevice::submit(vk::raii::CommandBuffer &&buf
         waitSemaphores.push_back(*waitSemaphore);
         waitFlags.push_back(vk::PipelineStageFlagBits::eAllCommands);
     }
-    vk::Result result = m_graphicsQueue.submit(vk::SubmitInfo{
-                                                   waitSemaphores,
-                                                   waitFlags,
-                                                   *buffer,
-                                                   {},
-                                               },
-                                               fence);
+    vk::Result result = queue.submit(vk::SubmitInfo{
+                                         waitSemaphores,
+                                         waitFlags,
+                                         *buffer,
+                                         {},
+                                     },
+                                     fence);
     if (result == vk::Result::eErrorDeviceLost) {
         handleDeviceLoss();
         return std::nullopt;
@@ -457,7 +583,7 @@ std::optional<FileDescriptor> VulkanDevice::submit(vk::raii::CommandBuffer &&buf
         return std::nullopt;
     }
     FileDescriptor ret{fd};
-    m_submittedCommandBuffers.push_back(SubmittedCommand{
+    submissions.push_back(SubmittedCommand{
         .waitSemaphore = waitSemaphore ? std::move(*waitSemaphore) : nullptr,
         .buffer = std::move(buffer),
         .completionSyncFd = ret.duplicate(),
@@ -522,6 +648,17 @@ vk::raii::DeviceMemory VulkanDevice::allocateMemory(const vk::BufferCreateInfo &
 void VulkanDevice::waitIdle()
 {
     m_graphicsQueue.waitIdle();
+    if (*m_computeQueue != *m_graphicsQueue) {
+        m_computeQueue.waitIdle();
+    }
+}
+
+void VulkanDevice::waitComputeIdle()
+{
+    const vk::Result result = m_computeQueue.waitIdle();
+    if (result == vk::Result::eErrorDeviceLost) {
+        handleDeviceLoss();
+    }
 }
 
 }

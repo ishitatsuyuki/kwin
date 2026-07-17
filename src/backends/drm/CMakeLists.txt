@@ -24,6 +24,8 @@ target_sources(kwin PRIVATE
     drm_qpainter_layer.cpp
     drm_virtual_egl_layer.cpp
     drm_virtual_output.cpp
+    drm_vulkan_backend.cpp
+    drm_vulkan_layer.cpp
 )
 
 target_link_libraries(kwin PRIVATE gbm::gbm PkgConfig::Libxcvt)

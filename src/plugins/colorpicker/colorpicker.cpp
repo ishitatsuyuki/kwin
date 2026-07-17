@@ -56,7 +56,8 @@ namespace KWin
 
 bool ColorPickerEffect::supported()
 {
-    return effects->isOpenGLCompositing();
+    return effects->isOpenGLCompositing()
+        || effects->compositingType() == VulkanCompositing;
 }
 
 ColorPickerEffect::ColorPickerEffect()
@@ -95,20 +96,29 @@ QColor ColorPickerEffect::pick()
             });
 
             const auto eglBackend = dynamic_cast<EglBackend *>(Compositor::self()->backend());
-            if (!eglBackend) {
-                return;
-            }
-            const auto context = eglBackend->openglContext();
-            if (!context || !context->makeCurrent()) {
-                return;
-            }
-
-            const auto offscreenTexture = GLTexture::allocate(GL_RGB8, QSize(1, 1));
-            if (!offscreenTexture) {
-                return;
-            }
-            const auto target = std::make_unique<GLFramebuffer>(offscreenTexture.get());
-            if (!target->valid()) {
+            EglContext *context = nullptr;
+            std::unique_ptr<GLTexture> offscreenTexture;
+            std::unique_ptr<GLFramebuffer> glTarget;
+            QImage snapshot(QSize(1, 1), QImage::Format_RGBA8888);
+            std::optional<RenderTarget> renderTarget;
+            if (eglBackend) {
+                context = eglBackend->openglContext();
+                if (!context || !context->makeCurrent()) {
+                    return;
+                }
+                offscreenTexture = GLTexture::allocate(GL_RGB8, QSize(1, 1));
+                if (!offscreenTexture) {
+                    return;
+                }
+                glTarget = std::make_unique<GLFramebuffer>(offscreenTexture.get());
+                if (!glTarget->valid()) {
+                    return;
+                }
+                renderTarget.emplace(glTarget.get());
+            } else if (Compositor::self()->backend()->compositingType() == VulkanCompositing) {
+                snapshot.fill(Qt::transparent);
+                renderTarget.emplace(&snapshot);
+            } else {
                 return;
             }
 
@@ -117,7 +127,7 @@ QColor ColorPickerEffect::pick()
                 return;
             }
 
-            ColorPickerLayer layer(screen->backendOutput(), target.get());
+            ColorPickerLayer layer(screen->backendOutput(), *renderTarget);
             if (!layer.preparePresentationTest()) {
                 return;
             }
@@ -137,10 +147,11 @@ QColor ColorPickerEffect::pick()
                 return;
             }
 
-            GLFramebuffer::pushFramebuffer(target.get());
-            QImage snapshot = QImage(offscreenTexture->size(), QImage::Format_RGBA8888);
-            context->glReadnPixels(0, 0, snapshot.width(), snapshot.height(), GL_RGBA, GL_UNSIGNED_BYTE, snapshot.sizeInBytes(), static_cast<GLvoid *>(snapshot.bits()));
-            GLFramebuffer::popFramebuffer();
+            if (glTarget) {
+                GLFramebuffer::pushFramebuffer(glTarget.get());
+                context->glReadnPixels(0, 0, snapshot.width(), snapshot.height(), GL_RGBA, GL_UNSIGNED_BYTE, snapshot.sizeInBytes(), static_cast<GLvoid *>(snapshot.bits()));
+                GLFramebuffer::popFramebuffer();
+            }
 
             QDBusConnection::sessionBus().send(m_replyMessage.createReply(snapshot.pixelColor(0, 0)));
         }

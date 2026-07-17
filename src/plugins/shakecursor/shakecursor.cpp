@@ -61,7 +61,8 @@ ShakeCursorEffect::~ShakeCursorEffect()
 
 bool ShakeCursorEffect::supported()
 {
-    return effects->isOpenGLCompositing();
+    return effects->isOpenGLCompositing()
+        || effects->compositingType() == VulkanCompositing;
 }
 
 bool ShakeCursorEffect::isActive() const

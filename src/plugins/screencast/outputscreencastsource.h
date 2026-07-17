@@ -16,6 +16,7 @@ namespace KWin
 class FilteredSceneView;
 class ItemTreeView;
 class LogicalOutput;
+class RenderTarget;
 class ScreencastLayer;
 
 class OutputScreenCastSource : public ScreenCastSource
@@ -33,6 +34,7 @@ public:
 
     void setRenderCursor(bool enable) override;
     Region render(GLFramebuffer *target, const Region &bufferRepair) override;
+    Region render(VulkanRenderTarget *target, const Region &bufferRepair) override;
     Region render(QImage *target, const Region &bufferRepair) override;
     std::chrono::nanoseconds clock() const override;
 
@@ -45,6 +47,8 @@ public:
     RectF mapFromGlobal(const RectF &rect) const override;
 
 private:
+    Region render(const RenderTarget &target, const Region &bufferRepair);
+
     QPointer<LogicalOutput> m_output;
     std::optional<pid_t> m_pidToHide;
     std::unique_ptr<ScreencastLayer> m_layer;

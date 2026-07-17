@@ -51,7 +51,8 @@ private:
 class KWIN_EXPORT VulkanSwapchain
 {
 public:
-    explicit VulkanSwapchain(VulkanDevice *device, GraphicsBufferAllocator *allocator, const QSize &size, uint32_t format, uint64_t modifier, std::shared_ptr<VulkanSwapchainSlot> &&initialSlot);
+    explicit VulkanSwapchain(VulkanDevice *device, GraphicsBufferAllocator *allocator, const QSize &size, uint32_t format, uint64_t modifier,
+                             VkImageUsageFlags usage, std::shared_ptr<VulkanSwapchainSlot> &&initialSlot);
     ~VulkanSwapchain();
 
     QSize size() const;
@@ -63,7 +64,9 @@ public:
 
     void resetBufferAge();
 
-    static std::unique_ptr<VulkanSwapchain> create(VulkanDevice *device, GraphicsBufferAllocator *allocator, const QSize &size, uint32_t format, const ModifierList &modifiers);
+    static std::unique_ptr<VulkanSwapchain> create(VulkanDevice *device, GraphicsBufferAllocator *allocator, const QSize &size, uint32_t format,
+                                                   const ModifierList &modifiers,
+                                                   VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 
 private:
     VulkanDevice *const m_device;
@@ -71,6 +74,7 @@ private:
     const QSize m_size;
     const uint32_t m_format;
     const uint64_t m_modifier;
+    const VkImageUsageFlags m_usage;
     std::vector<std::shared_ptr<VulkanSwapchainSlot>> m_slots;
 };
 

@@ -17,6 +17,8 @@ namespace KWin
 class GLFramebuffer;
 class GLTexture;
 class GraphicsBuffer;
+class VulkanRenderTarget;
+class VulkanTexture;
 struct GraphicsBufferOptions;
 
 class ScreenCastBuffer
@@ -35,13 +37,21 @@ class DmaBufScreenCastBuffer : public ScreenCastBuffer
 {
 public:
     static DmaBufScreenCastBuffer *create(pw_buffer *pwBuffer, const GraphicsBufferOptions &options);
+    ~DmaBufScreenCastBuffer() override;
 
     std::shared_ptr<GLTexture> texture;
     std::unique_ptr<GLFramebuffer> framebuffer;
+    std::shared_ptr<VulkanTexture> vulkanTexture;
+    std::unique_ptr<VulkanRenderTarget> vulkanTarget;
     std::unique_ptr<SyncTimeline> synctimeline;
 
 private:
-    DmaBufScreenCastBuffer(GraphicsBuffer *buffer, std::shared_ptr<GLTexture> &&texture, std::unique_ptr<GLFramebuffer> &&framebuffer, std::unique_ptr<SyncTimeline> &&synctimeline);
+    DmaBufScreenCastBuffer(GraphicsBuffer *buffer,
+                           std::shared_ptr<GLTexture> &&texture,
+                           std::unique_ptr<GLFramebuffer> &&framebuffer,
+                           std::shared_ptr<VulkanTexture> &&vulkanTexture,
+                           std::unique_ptr<VulkanRenderTarget> &&vulkanTarget,
+                           std::unique_ptr<SyncTimeline> &&synctimeline);
 };
 
 class MemFdScreenCastBuffer : public ScreenCastBuffer

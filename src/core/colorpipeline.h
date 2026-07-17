@@ -134,6 +134,16 @@ public:
         FloatingPoint,
     };
     static ColorPipeline create(const std::shared_ptr<ColorDescription> &from, const std::shared_ptr<ColorDescription> &to, RenderingIntent intent, InputType inputType = InputType::FixedPoint);
+    /**
+     * Creates the final scanout transform represented by an ICC profile. The
+     * operation order matches IccShader, but remains CPU-evaluable so backends
+     * can bake it into a single 3D LUT.
+     */
+    static ColorPipeline createIcc(const std::shared_ptr<IccProfile> &profile,
+                                   const std::shared_ptr<ColorDescription> &inputColor,
+                                   const Colorimetry &wireColor,
+                                   TransferFunction::Type wireTransfer,
+                                   RenderingIntent intent);
 
     ColorPipeline merged(const ColorPipeline &onTop) const;
 

@@ -6,6 +6,8 @@
 
 #include "systembell.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

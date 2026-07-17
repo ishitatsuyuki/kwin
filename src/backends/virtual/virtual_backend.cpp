@@ -14,7 +14,10 @@
 #include "virtual_egl_backend.h"
 #include "virtual_output.h"
 #include "virtual_qpainter_backend.h"
+#include "virtual_vulkan_backend.h"
+#include "vulkan/vulkan_device.h"
 
+#include <drm_fourcc.h>
 #include <fcntl.h>
 #include <gbm.h>
 #include <ranges>
@@ -97,6 +100,9 @@ QList<CompositingType> VirtualBackend::supportedCompositors() const
     QList<CompositingType> compositingTypes;
     if (m_renderDevice) {
         compositingTypes.append(OpenGLCompositing);
+        if (m_renderDevice->vulkanDevice() && m_renderDevice->vulkanDevice()->computeOutputFormats().contains(DRM_FORMAT_ABGR8888)) {
+            compositingTypes.append(VulkanCompositing);
+        }
     }
     compositingTypes.append(QPainterCompositing);
     return compositingTypes;
@@ -115,6 +121,14 @@ std::unique_ptr<QPainterBackend> VirtualBackend::createQPainterBackend()
 std::unique_ptr<EglBackend> VirtualBackend::createOpenGLBackend()
 {
     return std::make_unique<VirtualEglBackend>(this);
+}
+
+std::unique_ptr<VulkanBackend> VirtualBackend::createVulkanBackend()
+{
+    if (!m_renderDevice || !m_renderDevice->vulkanDevice()) {
+        return nullptr;
+    }
+    return std::make_unique<VirtualVulkanBackend>(this);
 }
 
 BackendOutput *VirtualBackend::createVirtualOutput(const QString &name, const QString &description, const QSize &size, qreal scale)

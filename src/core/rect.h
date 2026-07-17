@@ -8,9 +8,11 @@
 
 #include "kwin_export.h"
 
-#include <QDataStream>
-#include <QObject>
 #include <QRect>
+#include <QtCore/qobjectdefs.h>
+
+class QDataStream;
+class QDebug;
 
 namespace KWin
 {

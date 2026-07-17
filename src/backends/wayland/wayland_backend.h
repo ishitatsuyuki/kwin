@@ -217,6 +217,7 @@ public:
     std::unique_ptr<InputBackend> createInputBackend() override;
     std::unique_ptr<EglBackend> createOpenGLBackend() override;
     std::unique_ptr<QPainterBackend> createQPainterBackend() override;
+    std::unique_ptr<VulkanBackend> createVulkanBackend() override;
 
     WaylandDisplay *display() const
     {
@@ -244,6 +245,7 @@ public:
     void removeVirtualOutput(BackendOutput *output) override;
 
     wl_buffer *importBuffer(GraphicsBuffer *graphicsBuffer);
+    void releaseBuffer(GraphicsBuffer *graphicsBuffer);
 
     DrmDevice *drmDevice() const;
 

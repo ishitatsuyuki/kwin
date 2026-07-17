@@ -8,9 +8,9 @@
 namespace KWin
 {
 
-ScreenshotLayer::ScreenshotLayer(LogicalOutput *output, GLFramebuffer *buffer)
+ScreenshotLayer::ScreenshotLayer(LogicalOutput *output, const RenderTarget &renderTarget)
     : OutputLayer(output->backendOutput(), OutputLayerType::Primary)
-    , m_buffer(buffer)
+    , m_renderTarget(renderTarget)
 {
 }
 
@@ -27,7 +27,7 @@ FormatModifierMap ScreenshotLayer::supportedDrmFormats() const
 std::optional<OutputLayerBeginFrameInfo> ScreenshotLayer::doBeginFrame()
 {
     return OutputLayerBeginFrameInfo{
-        .renderTarget = RenderTarget(m_buffer),
+        .renderTarget = m_renderTarget,
         .repaint = Region::infinite(),
     };
 }

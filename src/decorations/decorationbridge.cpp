@@ -40,6 +40,8 @@ static const QString s_configKeyName = QStringLiteral("org.kde.kdecoration2");
 static const QString s_defaultPlugin = QStringLiteral("org.kde.breeze");
 static const QString s_fallbackPlugin = QStringLiteral("org.kde.kwin.aurorae");
 
+DecorationBridge::~DecorationBridge() = default;
+
 static void migrateAuroraeTheme()
 {
     const QString themeName = kwinApp()->config()->group(s_configKeyName).readEntry("theme");

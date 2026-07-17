@@ -105,9 +105,10 @@ bool WaylandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Regio
     // Flush rendering commands to the dmabuf.
     glFlush();
     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
+    FileDescriptor releaseFd = releaseFence.takeFileDescriptor();
 
-    setBuffer(m_buffer->buffer(), damagedDeviceRegion);
-    m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+    setBuffer(m_buffer->buffer(), damagedDeviceRegion, releaseFd.duplicate());
+    m_swapchain->release(m_buffer, std::move(releaseFd));
 
     m_damageJournal.add(damagedDeviceRegion);
     return true;
@@ -202,10 +203,10 @@ bool WaylandEglCursorLayer::doEndFrame(const Region &renderedDeviceRegion, const
     wl_buffer *buffer = m_backend->backend()->importBuffer(m_buffer->buffer());
     Q_ASSERT(buffer);
 
-    static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_buffer->buffer()->size() / m_output->scale(), (hotspot() / m_output->scale()).toPoint());
-
     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
-    m_swapchain->release(m_buffer, releaseFence.takeFileDescriptor());
+    FileDescriptor releaseFd = releaseFence.takeFileDescriptor();
+    static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_buffer->buffer()->size() / m_output->scale(), (hotspot() / m_output->scale()).toPoint(), m_buffer->buffer(), releaseFd.duplicate());
+    m_swapchain->release(m_buffer, std::move(releaseFd));
     return true;
 }
 

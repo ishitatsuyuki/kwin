@@ -41,6 +41,7 @@ namespace Wayland
 {
 
 class WaylandOutput;
+class WaylandExplicitSync;
 
 class WaylandLayer : public OutputLayer
 {
@@ -49,7 +50,7 @@ public:
     ~WaylandLayer() override;
 
     bool test() const;
-    void setBuffer(GraphicsBuffer *buffer, const Region &deviceDamagedRegion);
+    void setBuffer(GraphicsBuffer *buffer, const Region &deviceDamagedRegion, FileDescriptor &&acquireFence = {});
     void commit(PresentationMode presentationMode);
 
     KWayland::Client::Surface *surface() const;
@@ -63,9 +64,11 @@ protected:
     wp_color_management_surface_v1 *m_colorSurface = nullptr;
     wp_fractional_scale_v1 *m_fractionalScale = nullptr;
     std::unique_ptr<WaylandClient::Viewport> m_viewport;
+    std::unique_ptr<WaylandExplicitSync> m_explicitSync;
     std::shared_ptr<ColorDescription> m_previousColor;
     GraphicsBufferRef m_pendingBuffer;
     Region m_pendingDamage;
+    FileDescriptor m_pendingAcquireFence;
 };
 
 }

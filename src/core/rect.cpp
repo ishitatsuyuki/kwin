@@ -6,6 +6,8 @@
 
 #include "core/rect.h"
 
+#include <QDataStream>
+#include <QDebug>
 #include <QDebugStateSaver>
 
 QDebug operator<<(QDebug dbg, const KWin::Rect &rect)

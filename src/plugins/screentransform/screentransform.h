@@ -18,6 +18,8 @@ namespace KWin
 class GLFramebuffer;
 class GLShader;
 class GLTexture;
+class VulkanScreenCapture;
+class VulkanTexture;
 
 class ScreenTransformEffect : public Effect
 {
@@ -43,6 +45,7 @@ private:
     {
         std::shared_ptr<GLTexture> texture;
         std::shared_ptr<GLFramebuffer> framebuffer;
+        std::shared_ptr<VulkanTexture> vulkanTexture;
     };
 
     struct ScreenState
@@ -53,6 +56,7 @@ private:
         Rect m_oldGeometry;
         OutputTransform m_oldTransform;
         qreal m_angle = 0;
+        std::shared_ptr<VulkanScreenCapture> m_vulkanCapture;
     };
 
     void addScreen(LogicalOutput *screen);

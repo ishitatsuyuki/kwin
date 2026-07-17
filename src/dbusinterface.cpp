@@ -246,6 +246,8 @@ QString CompositorDBusInterface::compositingType() const
         }
     case QPainterCompositing:
         return QStringLiteral("qpainter");
+    case VulkanCompositing:
+        return QStringLiteral("vulkan");
     case NoCompositing:
     default:
         return QStringLiteral("none");

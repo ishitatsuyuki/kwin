@@ -9,14 +9,18 @@
 
 #include "output.h"
 #include "brightnessdevice.h"
+#include "colorspace.h"
 #include "iccprofile.h"
 #include "outputconfiguration.h"
+#include "region.h"
 
 #include <KConfigGroup>
 #include <KLocalizedString>
 #include <KSharedConfig>
 
+#include <QDebug>
 #include <QJSEngine>
+#include <QMatrix4x4>
 
 #include <libxcvt/libxcvt.h>
 

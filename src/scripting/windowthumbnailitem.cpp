@@ -32,10 +32,15 @@
 namespace KWin
 {
 
-static bool useGlThumbnails()
+static bool useNativeGlThumbnails()
 {
     static bool qtQuickIsSoftware = QStringList({QStringLiteral("software"), QStringLiteral("softwarecontext")}).contains(QQuickWindow::sceneGraphBackend());
     return Compositor::self()->backend() && Compositor::self()->backend()->compositingType() == OpenGLCompositing && !qtQuickIsSoftware;
+}
+
+static bool useOpenGlRenderer()
+{
+    return Compositor::self()->backend() && Compositor::self()->backend()->compositingType() == OpenGLCompositing;
 }
 
 WindowThumbnailSource::WindowThumbnailSource(QQuickWindow *view, Window *handle)
@@ -103,8 +108,9 @@ std::shared_ptr<WindowThumbnailSource> WindowThumbnailSource::getOrCreate(QQuick
 WindowThumbnailSource::Frame WindowThumbnailSource::acquire()
 {
     return Frame{
-        .texture = m_offscreenTexture,
+        .texture = m_offscreenImage.isNull() ? m_offscreenTexture : nullptr,
         .fence = std::exchange(m_acquireFence, nullptr),
+        .image = m_offscreenImage,
     };
 }
 
@@ -119,18 +125,28 @@ void WindowThumbnailSource::update()
     const qreal devicePixelRatio = m_view->devicePixelRatio();
     const QSize textureSize = geometry.toAlignedRect().size() * devicePixelRatio;
 
-    if (!m_offscreenTexture || m_offscreenTexture->size() != textureSize) {
-        m_offscreenTexture = GLTexture::allocate(GL_RGBA8, textureSize);
-        if (!m_offscreenTexture) {
-            return;
+    const bool usingOpenGl = useOpenGlRenderer();
+    if (usingOpenGl) {
+        if (!m_offscreenTexture || m_offscreenTexture->size() != textureSize) {
+            m_offscreenTexture = GLTexture::allocate(GL_RGBA8, textureSize);
+            if (!m_offscreenTexture) {
+                return;
+            }
+            m_offscreenTexture->setContentTransform(OutputTransform::FlipY);
+            m_offscreenTexture->setFilter(GL_LINEAR);
+            m_offscreenTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+            m_offscreenTarget = std::make_unique<GLFramebuffer>(m_offscreenTexture.get());
         }
-        m_offscreenTexture->setContentTransform(OutputTransform::FlipY);
-        m_offscreenTexture->setFilter(GL_LINEAR);
-        m_offscreenTexture->setWrapMode(GL_CLAMP_TO_EDGE);
-        m_offscreenTarget = std::make_unique<GLFramebuffer>(m_offscreenTexture.get());
+    } else if (m_offscreenImage.size() != textureSize) {
+        m_offscreenImage = QImage(textureSize, QImage::Format_RGBA8888_Premultiplied);
     }
 
-    RenderTarget offscreenRenderTarget(m_offscreenTarget.get());
+    if (!usingOpenGl) {
+        m_offscreenImage.fill(Qt::transparent);
+    }
+    RenderTarget offscreenRenderTarget = usingOpenGl
+        ? RenderTarget(m_offscreenTarget.get())
+        : RenderTarget(&m_offscreenImage);
     RenderViewport offscreenViewport(geometry, devicePixelRatio, offscreenRenderTarget, QPoint());
 
     // The thumbnail must be rendered using kwin's opengl context as VAOs are not
@@ -143,10 +159,17 @@ void WindowThumbnailSource::update()
     renderer->renderItem(offscreenRenderTarget, offscreenViewport, m_handle->windowItem(), mask, Region::infinite(), WindowPaintData{}, {}, {});
     renderer->endFrame();
 
-    // The fence is needed to avoid the case where qtquick renderer starts using
-    // the texture while all rendering commands to it haven't completed yet.
     m_dirty = false;
-    m_acquireFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (usingOpenGl && useNativeGlThumbnails()) {
+        m_offscreenImage = QImage();
+        // The fence is needed to avoid the case where qtquick renderer starts using
+        // the texture while all rendering commands to it haven't completed yet.
+        m_acquireFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    } else if (usingOpenGl) {
+        // The software Qt Quick scene graph can't consume a native GL texture.
+        // Read it back and let Qt create a software scene-graph texture instead.
+        m_offscreenImage = m_offscreenTexture->toImage().mirrored(false, true);
+    }
 
     Q_EMIT changed();
 }
@@ -158,6 +181,7 @@ public:
 
     QSGTexture *texture() const override;
     void setTexture(const std::shared_ptr<GLTexture> &nativeTexture);
+    void setImage(const QImage &image);
     void setTexture(QSGTexture *texture);
 
 private:
@@ -190,6 +214,18 @@ void ThumbnailTextureProvider::setTexture(const std::shared_ptr<GLTexture> &nati
     }
 
     // The textureChanged signal must be emitted also if only texture data changes.
+    Q_EMIT textureChanged();
+}
+
+void ThumbnailTextureProvider::setImage(const QImage &image)
+{
+    m_nativeTexture = nullptr;
+    m_texture.reset(m_window->createTextureFromImage(image, QQuickWindow::TextureHasAlphaChannel));
+    if (m_texture) {
+        m_texture->setFiltering(QSGTexture::Linear);
+        m_texture->setHorizontalWrapMode(QSGTexture::ClampToEdge);
+        m_texture->setVerticalWrapMode(QSGTexture::ClampToEdge);
+    }
     Q_EMIT textureChanged();
 }
 
@@ -286,7 +322,7 @@ void WindowThumbnailItem::resetSource()
 
 void WindowThumbnailItem::updateSource()
 {
-    if (useGlThumbnails() && window() && m_client) {
+    if (Compositor::self()->backend() && window() && m_client) {
         m_source = WindowThumbnailSource::getOrCreate(window(), m_client);
         connect(m_source.get(), &WindowThumbnailSource::changed, this, &WindowThumbnailItem::update);
     } else {
@@ -297,11 +333,12 @@ void WindowThumbnailItem::updateSource()
 QSGNode *WindowThumbnailItem::updatePaintNode(QSGNode *oldNode, QQuickItem::UpdatePaintNodeData *)
 {
     if (!m_source) {
-        return oldNode;
+        delete oldNode;
+        return nullptr;
     }
 
-    auto [texture, acquireFence] = m_source->acquire();
-    if (!texture) {
+    auto [texture, acquireFence, image] = m_source->acquire();
+    if (!texture && image.isNull()) {
         return oldNode;
     }
 
@@ -314,7 +351,14 @@ QSGNode *WindowThumbnailItem::updatePaintNode(QSGNode *oldNode, QQuickItem::Upda
     if (!m_provider) {
         m_provider = new ThumbnailTextureProvider(window());
     }
-    m_provider->setTexture(texture);
+    if (texture) {
+        m_provider->setTexture(texture);
+    } else {
+        m_provider->setImage(image);
+    }
+    if (!m_provider->texture()) {
+        return oldNode;
+    }
 
     QSGImageNode *node = static_cast<QSGImageNode *>(oldNode);
     if (!node) {

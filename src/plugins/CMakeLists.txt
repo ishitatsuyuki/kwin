@@ -25,6 +25,11 @@ endfunction()
 
 macro(kwin_add_builtin_effect name)
     kcoreaddons_add_plugin(${name} STATIC SOURCES ${ARGN} INSTALL_NAMESPACE "kwin/effects/plugins")
+    set_property(TARGET ${name} PROPERTY UNITY_BUILD ON)
+    # The generated main.moc leaves a global `using namespace KWin;`, which
+    # can affect source files included after it in a unity TU. Set this even
+    # when main.cpp is added to the target after this macro returns.
+    set_source_files_properties(main.cpp PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
     target_compile_definitions(${name} PRIVATE -DTRANSLATION_DOMAIN=\"kwin\")
     kwin_strip_builtin_effect_metadata(${name} metadata.json)
     install(FILES metadata.json DESTINATION ${KDE_INSTALL_DATADIR}/kwin-wayland/builtin-effects/ RENAME ${name}.json)

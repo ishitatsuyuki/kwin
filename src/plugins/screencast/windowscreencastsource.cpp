@@ -20,8 +20,12 @@
 #include "scene/itemrenderer.h"
 #include "scene/windowitem.h"
 #include "scene/workspacescene.h"
+#include "vulkan/vulkan_backend.h"
+#include "vulkan/vulkan_rendertarget.h"
+#include "vulkan/vulkan_texture.h"
 #include "workspace.h"
 
+#include <QPainter>
 #include <drm_fourcc.h>
 
 namespace KWin
@@ -108,6 +112,27 @@ void WindowScreenCastSource::setRenderCursor(bool enable)
 
 Region WindowScreenCastSource::render(QImage *target, const Region &bufferDamage)
 {
+    if (const auto vulkanBackend = dynamic_cast<VulkanBackend *>(Compositor::self()->backend())) {
+        const auto texture = VulkanTexture::allocate(vulkanBackend->device(),
+                                                     vk::Format::eR8G8B8A8Unorm,
+                                                     target->size(),
+                                                     vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+                                                     VulkanQueueRole::Compute);
+        if (!texture) {
+            return Region{};
+        }
+        VulkanRenderTarget vulkanTarget(texture.get());
+        const Region ret = render(RenderTarget(&vulkanTarget), bufferDamage);
+        const QImage image = texture->download();
+        if (image.isNull()) {
+            return Region{};
+        }
+        QPainter painter(target);
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.drawImage(QPoint(), image);
+        return ret;
+    }
+
     const auto offscreenTexture = GLTexture::allocate(GL_RGBA8, target->size());
     if (!offscreenTexture) {
         return Region{};
@@ -122,22 +147,30 @@ Region WindowScreenCastSource::render(QImage *target, const Region &bufferDamage
 
 Region WindowScreenCastSource::render(GLFramebuffer *target, const Region &bufferDamage)
 {
-    RenderTarget renderTarget(target);
-    RenderViewport viewport(boundingRect(), devicePixelRatio(), renderTarget, QPoint());
+    return render(RenderTarget(target), bufferDamage);
+}
+
+Region WindowScreenCastSource::render(VulkanRenderTarget *target, const Region &bufferDamage)
+{
+    return render(RenderTarget(target), bufferDamage);
+}
+
+Region WindowScreenCastSource::render(const RenderTarget &target, const Region &bufferDamage)
+{
+    RenderViewport viewport(boundingRect(), devicePixelRatio(), target, QPoint());
 
     WorkspaceScene *scene = kwinApp()->scene();
 
-    scene->renderer()->beginFrame(renderTarget, viewport);
-    glClearColor(0.0, 0.0, 0.0, 0.0);
-    glClear(GL_COLOR_BUFFER_BIT);
+    scene->renderer()->beginFrame(target, viewport);
+    scene->renderer()->renderBackground(target, viewport, Region::infinite());
     for (const auto &window : m_windows) {
-        scene->renderer()->renderItem(renderTarget, viewport, window->windowItem(), Scene::PAINT_WINDOW_TRANSFORMED, Region::infinite(), WindowPaintData{}, {}, {});
+        scene->renderer()->renderItem(target, viewport, window->windowItem(), Scene::PAINT_WINDOW_TRANSFORMED, Region::infinite(), WindowPaintData{}, {}, {});
     }
     if (m_renderCursor && scene->cursorItem()->isVisible()) {
-        scene->renderer()->renderItem(renderTarget, viewport, scene->cursorItem(), 0, Region::infinite(), WindowPaintData{}, {}, {});
+        scene->renderer()->renderItem(target, viewport, scene->cursorItem(), 0, Region::infinite(), WindowPaintData{}, {}, {});
     }
     scene->renderer()->endFrame();
-    return Rect(QPoint(), target->size());
+    return Rect(QPoint(), target.size());
 }
 
 std::chrono::nanoseconds WindowScreenCastSource::clock() const

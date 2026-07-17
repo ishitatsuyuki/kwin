@@ -73,6 +73,8 @@
 #include "scene/surfaceitem.h"
 #include "scene/windowitem.h"
 #include "utils/envvar.h"
+#include "vulkan/vulkan_backend.h"
+#include "vulkan/vulkan_device.h"
 #include "wayland/seat.h"
 #include "wayland_server.h"
 #include "window.h"
@@ -818,12 +820,17 @@ EglContext *WorkspaceScene::openglContext() const
 {
     if (auto eglBackend = qobject_cast<EglBackend *>(Compositor::self()->backend())) {
         return eglBackend->openglContext();
+    } else if (auto vulkanBackend = qobject_cast<VulkanBackend *>(Compositor::self()->backend())) {
+        return vulkanBackend->openglContext();
     }
     return nullptr;
 }
 
 bool WorkspaceScene::animationsSupported() const
 {
+    if (auto vulkanBackend = qobject_cast<VulkanBackend *>(Compositor::self()->backend())) {
+        return vulkanBackend->device() && !vulkanBackend->device()->isSoftwareRenderer();
+    }
     const auto context = openglContext();
     return context && !context->isSoftwareRenderer();
 }

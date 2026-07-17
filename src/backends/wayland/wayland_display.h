@@ -19,6 +19,7 @@ struct wp_presentation;
 struct wp_tearing_control_manager_v1;
 struct wp_fractional_scale_manager_v1;
 struct wp_single_pixel_buffer_manager_v1;
+struct wp_linux_drm_syncobj_manager_v1;
 struct xdg_toplevel_icon_manager_v1;
 struct zwp_keyboard_shortcuts_inhibit_manager_v1;
 
@@ -83,6 +84,7 @@ public:
     wp_fractional_scale_manager_v1 *fractionalScale() const;
     WaylandClient::Viewporter *viewporter() const;
     wp_single_pixel_buffer_manager_v1 *singlePixelManager() const;
+    wp_linux_drm_syncobj_manager_v1 *explicitSync() const;
     xdg_toplevel_icon_manager_v1 *toplevelIconManager() const;
     zwp_keyboard_shortcuts_inhibit_manager_v1 *keyboardShortcutsInhibitManager() const;
 
@@ -101,6 +103,7 @@ private:
     wp_fractional_scale_manager_v1 *m_fractionalScaleV1 = nullptr;
     std::unique_ptr<WaylandClient::Viewporter> m_viewporter;
     wp_single_pixel_buffer_manager_v1 *m_singlePixelManager = nullptr;
+    wp_linux_drm_syncobj_manager_v1 *m_explicitSync = nullptr;
     xdg_toplevel_icon_manager_v1 *m_toplevelIconManager = nullptr;
     zwp_keyboard_shortcuts_inhibit_manager_v1 *m_keyboardShortcutsInhibitManager = nullptr;
     std::unique_ptr<ColorManager> m_colorManager;

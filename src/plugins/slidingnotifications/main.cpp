@@ -6,6 +6,8 @@
 
 #include "slidingnotifications.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

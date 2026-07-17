@@ -15,6 +15,8 @@
 namespace KWin
 {
 
+class RenderTarget;
+
 class WindowScreenCastSource : public ScreenCastSource
 {
     Q_OBJECT
@@ -30,6 +32,7 @@ public:
 
     void setRenderCursor(bool enable) override;
     Region render(GLFramebuffer *target, const Region &bufferDamage) override;
+    Region render(VulkanRenderTarget *target, const Region &bufferDamage) override;
     Region render(QImage *target, const Region &bufferDamage) override;
     std::chrono::nanoseconds clock() const override;
 
@@ -46,6 +49,7 @@ private:
     void watch(Window *window);
     void unwatch(Window *window);
     RectF boundingRect() const;
+    Region render(const RenderTarget &target, const Region &bufferDamage);
 
     QList<Window *> m_windows;
     bool m_active = false;

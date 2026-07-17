@@ -6,6 +6,8 @@
 
 #include "plugins/shakecursor/shakecursor.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

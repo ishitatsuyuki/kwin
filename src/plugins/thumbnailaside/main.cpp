@@ -6,6 +6,8 @@
 
 #include "thumbnailaside.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

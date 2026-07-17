@@ -8,6 +8,8 @@
 
 #include "scene/atlas.h"
 
+#include <QImage>
+
 namespace KWin
 {
 

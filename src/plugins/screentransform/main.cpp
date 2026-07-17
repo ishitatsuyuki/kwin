@@ -6,6 +6,8 @@
 
 #include "screentransform.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

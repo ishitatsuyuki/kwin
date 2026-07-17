@@ -569,6 +569,7 @@ PlatformCursorImage Application::cursorImage() const
     case OpenGLCompositing:
         return grabCursorOpenGL(m_scene.get());
     case QPainterCompositing:
+    case VulkanCompositing:
         return grabCursorSoftware(m_scene.get());
     default:
         Q_UNREACHABLE();

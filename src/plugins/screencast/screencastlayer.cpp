@@ -18,8 +18,13 @@ ScreencastLayer::ScreencastLayer(LogicalOutput *output, const FormatModifierMap 
 
 void ScreencastLayer::setFramebuffer(GLFramebuffer *buffer, const Region &bufferDamage)
 {
+    setRenderTarget(RenderTarget(buffer), bufferDamage);
+}
+
+void ScreencastLayer::setRenderTarget(const RenderTarget &target, const Region &bufferDamage)
+{
     // TODO is there a better way to deal with this?
-    m_buffer = buffer;
+    m_renderTarget.emplace(target);
     m_bufferDamage = bufferDamage;
 }
 
@@ -35,8 +40,11 @@ FormatModifierMap ScreencastLayer::supportedDrmFormats() const
 
 std::optional<OutputLayerBeginFrameInfo> ScreencastLayer::doBeginFrame()
 {
+    if (!m_renderTarget) {
+        return std::nullopt;
+    }
     return OutputLayerBeginFrameInfo{
-        .renderTarget = RenderTarget(m_buffer),
+        .renderTarget = *m_renderTarget,
         .repaint = m_bufferDamage,
     };
 }

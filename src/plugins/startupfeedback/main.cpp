@@ -6,6 +6,8 @@
 
 #include "startupfeedback.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

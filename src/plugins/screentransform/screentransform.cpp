@@ -13,8 +13,12 @@
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
+#include "effect/vulkanscreencapture.h"
 #include "opengl/glutils.h"
+#include "scene/itemrenderer_vulkan.h"
 #include "scene/workspacescene.h"
+#include "vulkan/vulkan_rendertarget.h"
+#include "vulkan/vulkan_texture.h"
 
 #include <QDebug>
 
@@ -37,19 +41,21 @@ ScreenTransformEffect::ScreenTransformEffect()
     // Make sure that shaders in /effects/screentransform/shaders/* are loaded.
     ensureResources();
 
-    m_shader = ShaderManager::instance()->generateShaderFromFile(
-        ShaderTrait::MapTexture,
-        QStringLiteral(":/effects/screentransform/shaders/crossfade.vert"),
-        QStringLiteral(":/effects/screentransform/shaders/crossfade.frag"));
-    if (!m_shader) {
-        qCCritical(KWIN_SCREENTRANSFORM) << "Failed to load the crossfade shader.";
-        return;
-    }
+    if (effects->compositingType() == OpenGLCompositing) {
+        m_shader = ShaderManager::instance()->generateShaderFromFile(
+            ShaderTrait::MapTexture,
+            QStringLiteral(":/effects/screentransform/shaders/crossfade.vert"),
+            QStringLiteral(":/effects/screentransform/shaders/crossfade.frag"));
+        if (!m_shader) {
+            qCCritical(KWIN_SCREENTRANSFORM) << "Failed to load the crossfade shader.";
+            return;
+        }
 
-    m_modelViewProjectioMatrixLocation = m_shader->uniformLocation("modelViewProjectionMatrix");
-    m_blendFactorLocation = m_shader->uniformLocation("blendFactor");
-    m_previousTextureLocation = m_shader->uniformLocation("previousTexture");
-    m_currentTextureLocation = m_shader->uniformLocation("currentTexture");
+        m_modelViewProjectioMatrixLocation = m_shader->uniformLocation("modelViewProjectionMatrix");
+        m_blendFactorLocation = m_shader->uniformLocation("blendFactor");
+        m_previousTextureLocation = m_shader->uniformLocation("previousTexture");
+        m_currentTextureLocation = m_shader->uniformLocation("currentTexture");
+    }
 
     const QList<LogicalOutput *> screens = effects->screens();
     for (auto screen : screens) {
@@ -63,7 +69,8 @@ ScreenTransformEffect::~ScreenTransformEffect() = default;
 
 bool ScreenTransformEffect::supported()
 {
-    return effects->compositingType() == OpenGLCompositing && effects->animationsSupported();
+    return (effects->compositingType() == OpenGLCompositing || effects->compositingType() == VulkanCompositing)
+        && effects->animationsSupported();
 }
 
 qreal transformAngle(OutputTransform current, OutputTransform old)
@@ -90,29 +97,52 @@ void ScreenTransformEffect::addScreen(LogicalOutput *screen)
             m_capturing = false;
         });
 
-        effects->makeOpenGLContextCurrent();
-        auto texture = GLTexture::allocate(GL_RGBA16F, screen->pixelSize());
-        if (!texture) {
-            m_states.remove(screen);
-            return;
-        }
         auto &state = m_states[screen];
         state.m_oldTransform = screen->transform();
         state.m_oldGeometry = screen->geometry();
         state.m_timeLine.setDuration(animationTime(250ms));
         state.m_timeLine.setEasingCurve(QEasingCurve::InOutCubic);
-        state.m_angle = transformAngle(changeSet->transform.value(), state.m_oldTransform);
-        state.m_prev.texture = std::move(texture);
-        state.m_prev.framebuffer = std::make_unique<GLFramebuffer>(state.m_prev.texture.get());
-        RenderTarget renderTarget(state.m_prev.framebuffer.get(), screen->blendingColor());
+        state.m_angle = transformAngle(transform, state.m_oldTransform);
+        state.m_prev = Snapshot{};
 
         Scene *scene = effects->scene();
         SceneView delegate(scene, screen, nullptr, nullptr);
         delegate.setViewport(screen->geometryF());
         delegate.setScale(screen->scale());
-        scene->prePaint(&delegate);
-        scene->paint(renderTarget, QPoint(), screen->geometry());
-        scene->postPaint();
+        if (effects->compositingType() == VulkanCompositing) {
+            auto renderer = dynamic_cast<ItemRendererVulkan *>(scene->renderer());
+            if (!renderer) {
+                m_states.remove(screen);
+                return;
+            }
+            const auto usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled;
+            auto texture = VulkanTexture::allocate(renderer->device(), vk::Format::eR16G16B16A16Sfloat, screen->pixelSize(), usage, VulkanQueueRole::Compute);
+            if (!texture) {
+                texture = VulkanTexture::allocate(renderer->device(), vk::Format::eR8G8B8A8Unorm, screen->pixelSize(), usage, VulkanQueueRole::Compute);
+            }
+            if (!texture) {
+                m_states.remove(screen);
+                return;
+            }
+            state.m_prev.vulkanTexture = std::shared_ptr<VulkanTexture>(std::move(texture));
+            VulkanRenderTarget vulkanTarget(state.m_prev.vulkanTexture.get());
+            const RenderTarget renderTarget(&vulkanTarget, screen->blendingColor());
+            scene->prePaint(&delegate);
+            scene->paint(renderTarget, QPoint(), screen->geometry());
+            scene->postPaint();
+        } else {
+            effects->makeOpenGLContextCurrent();
+            state.m_prev.texture = GLTexture::allocate(GL_RGBA16F, screen->pixelSize());
+            if (!state.m_prev.texture) {
+                m_states.remove(screen);
+                return;
+            }
+            state.m_prev.framebuffer = std::make_unique<GLFramebuffer>(state.m_prev.texture.get());
+            const RenderTarget renderTarget(state.m_prev.framebuffer.get(), screen->blendingColor());
+            scene->prePaint(&delegate);
+            scene->paint(renderTarget, QPoint(), screen->geometry());
+            scene->postPaint();
+        }
     });
 }
 
@@ -204,6 +234,60 @@ void ScreenTransformEffect::paintScreen(const RenderTarget &renderTarget, const 
     auto it = m_states.find(screen);
     if (it == m_states.end() || m_currentView->backendOutput() != screen->backendOutput()) {
         effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
+        return;
+    }
+
+    if (effects->compositingType() == VulkanCompositing) {
+        effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
+        auto renderer = dynamic_cast<ItemRendererVulkan *>(effects->scene()->renderer());
+        if (!renderer || !it->m_prev.vulkanTexture) {
+            return;
+        }
+        if (!it->m_vulkanCapture) {
+            it->m_vulkanCapture = std::make_shared<VulkanScreenCapture>(renderer->device());
+        }
+        VulkanTexture *currentTexture = it->m_vulkanCapture->capture(renderer, renderTarget.size(), renderTarget.colorDescription());
+        if (!currentTexture) {
+            return;
+        }
+
+        const qreal blendFactor = it->m_timeLine.value();
+        const RectF screenRect = screen->geometry();
+        const qreal angle = it->m_angle * (1 - blendFactor);
+        const RectF geometry = lerp(it->m_oldGeometry, screenRect, blendFactor);
+        QTransform rotation;
+        rotation.translate(screenRect.center().x(), screenRect.center().y());
+        rotation.rotate(angle);
+        rotation.translate(-screenRect.center().x(), -screenRect.center().y());
+        const auto mapPoint = [&viewport, &rotation](const QPointF &point) {
+            return viewport.mapToRenderTarget(rotation.map(point));
+        };
+        const std::array vertices{
+            mapPoint(geometry.topLeft()),
+            mapPoint(geometry.topRight()),
+            mapPoint(geometry.bottomRight()),
+            mapPoint(geometry.bottomLeft()),
+        };
+        const std::array textureCoordinates{
+            QPointF(0, 0),
+            QPointF(1, 0),
+            QPointF(1, 1),
+            QPointF(0, 1),
+        };
+        renderer->renderClearRect(QRectF(QPointF(), QSizeF(renderTarget.size())));
+        renderer->renderTextureQuad(currentTexture,
+                                    vertices,
+                                    textureCoordinates,
+                                    QRectF(QPointF(), QSizeF(renderTarget.size())),
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    renderTarget.colorDescription(),
+                                    VulkanColorFilter::ScreenTransformCrossFade,
+                                    {},
+                                    QVector4D(blendFactor, 0.0, 0.0, 0.0),
+                                    it->m_prev.vulkanTexture.get());
+        effects->addRepaintFull();
         return;
     }
 

@@ -114,6 +114,7 @@ public:
     bool initialize() override;
     std::unique_ptr<EglBackend> createOpenGLBackend() override;
     std::unique_ptr<QPainterBackend> createQPainterBackend() override;
+    std::unique_ptr<VulkanBackend> createVulkanBackend() override;
     std::unique_ptr<InputBackend> createInputBackend() override;
     QList<CompositingType> supportedCompositors() const override;
     QList<BackendOutput *> outputs() const override;

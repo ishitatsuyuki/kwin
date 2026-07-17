@@ -38,6 +38,7 @@
 #include "wayland-fractional-scale-v1-client-protocol.h"
 #include "wayland-keyboard-shortcuts-inhibit-unstable-v1-client-protocol.h"
 #include "wayland-linux-dmabuf-unstable-v1-client-protocol.h"
+#include "wayland-linux-drm-syncobj-v1-client-protocol.h"
 #include "wayland-pointer-constraints-unstable-v1-client-protocol.h"
 #include "wayland-pointer-gestures-unstable-v1-server-protocol.h"
 #include "wayland-presentation-time-client-protocol.h"
@@ -197,6 +198,9 @@ WaylandDisplay::~WaylandDisplay()
     }
     if (m_singlePixelManager) {
         wp_single_pixel_buffer_manager_v1_destroy(m_singlePixelManager);
+    }
+    if (m_explicitSync) {
+        wp_linux_drm_syncobj_manager_v1_destroy(m_explicitSync);
     }
     if (m_toplevelIconManager) {
         xdg_toplevel_icon_manager_v1_destroy(m_toplevelIconManager);
@@ -365,6 +369,11 @@ wp_single_pixel_buffer_manager_v1 *WaylandDisplay::singlePixelManager() const
     return m_singlePixelManager;
 }
 
+wp_linux_drm_syncobj_manager_v1 *WaylandDisplay::explicitSync() const
+{
+    return m_explicitSync;
+}
+
 xdg_toplevel_icon_manager_v1 *WaylandDisplay::toplevelIconManager() const
 {
     return m_toplevelIconManager;
@@ -427,6 +436,8 @@ void WaylandDisplay::registry_global(void *data, wl_registry *registry, uint32_t
         display->m_subCompositor->setup(static_cast<wl_subcompositor *>(wl_registry_bind(registry, name, &wl_subcompositor_interface, 1)));
     } else if (strcmp(interface, wp_single_pixel_buffer_manager_v1_interface.name) == 0) {
         display->m_singlePixelManager = reinterpret_cast<wp_single_pixel_buffer_manager_v1 *>(wl_registry_bind(registry, name, &wp_single_pixel_buffer_manager_v1_interface, 1));
+    } else if (strcmp(interface, wp_linux_drm_syncobj_manager_v1_interface.name) == 0) {
+        display->m_explicitSync = reinterpret_cast<wp_linux_drm_syncobj_manager_v1 *>(wl_registry_bind(registry, name, &wp_linux_drm_syncobj_manager_v1_interface, 1));
     } else if (strcmp(interface, xdg_toplevel_icon_manager_v1_interface.name) == 0) {
         display->m_toplevelIconManager = reinterpret_cast<xdg_toplevel_icon_manager_v1 *>(wl_registry_bind(registry, name, &xdg_toplevel_icon_manager_v1_interface, 1));
     } else if (strcmp(interface, zwp_keyboard_shortcuts_inhibit_manager_v1_interface.name) == 0) {

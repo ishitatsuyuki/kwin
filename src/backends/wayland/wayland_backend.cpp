@@ -13,12 +13,14 @@
 #include "core/gpumanager.h"
 #include "core/renderdevice.h"
 #include "input.h"
+#include "vulkan/vulkan_device.h"
 #include "wayland-client/linuxdmabuf.h"
 #include "wayland_display.h"
 #include "wayland_egl_backend.h"
 #include "wayland_logging.h"
 #include "wayland_output.h"
 #include "wayland_qpainter_backend.h"
+#include "wayland_vulkan_backend.h"
 
 #include <KWayland/Client/keyboard.h>
 #include <KWayland/Client/pointer.h>
@@ -515,6 +517,14 @@ std::unique_ptr<QPainterBackend> WaylandBackend::createQPainterBackend()
     return std::make_unique<WaylandQPainterBackend>(this);
 }
 
+std::unique_ptr<VulkanBackend> WaylandBackend::createVulkanBackend()
+{
+    if (!m_renderDevice || !m_renderDevice->vulkanDevice() || !m_display->linuxDmabuf()) {
+        return nullptr;
+    }
+    return std::make_unique<WaylandVulkanBackend>(this);
+}
+
 WaylandOutput *WaylandBackend::findOutput(KWayland::Client::Surface *nativeSurface) const
 {
     for (WaylandOutput *output : m_outputs) {
@@ -589,6 +599,12 @@ QList<CompositingType> WaylandBackend::supportedCompositors() const
     QList<CompositingType> ret;
     if (m_display->linuxDmabuf() && m_renderDevice) {
         ret.append(OpenGLCompositing);
+        if (m_renderDevice->vulkanDevice()) {
+            const ModifierList modifiers = m_renderDevice->vulkanDevice()->computeOutputFormats().value(DRM_FORMAT_ABGR8888).intersected(m_display->linuxDmabuf()->formats().value(DRM_FORMAT_ABGR8888));
+            if (!modifiers.isEmpty()) {
+                ret.append(VulkanCompositing);
+            }
+        }
     }
     ret.append(QPainterCompositing);
     return ret;
@@ -671,6 +687,14 @@ wl_buffer *WaylandBackend::importBuffer(GraphicsBuffer *graphicsBuffer)
 
     buffer->lock();
     return buffer->handle();
+}
+
+void WaylandBackend::releaseBuffer(GraphicsBuffer *graphicsBuffer)
+{
+    const auto it = m_buffers.find(graphicsBuffer);
+    if (it != m_buffers.end()) {
+        it->second->unlock();
+    }
 }
 
 EglDisplay *WaylandBackend::sceneEglDisplayObject() const

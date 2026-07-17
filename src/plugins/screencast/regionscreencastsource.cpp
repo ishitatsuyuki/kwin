@@ -13,15 +13,32 @@
 #include "core/output.h"
 #include "cursor.h"
 #include "opengl/eglbackend.h"
+#include "opengl/egldisplay.h"
 #include "opengl/glframebuffer.h"
 #include "opengl/gltexture.h"
 #include "scene/workspacescene.h"
+#include "vulkan/vulkan_backend.h"
+#include "vulkan/vulkan_device.h"
+#include "vulkan/vulkan_rendertarget.h"
+#include "vulkan/vulkan_texture.h"
 #include "workspace.h"
 
+#include <QPainter>
 #include <drm_fourcc.h>
 
 namespace KWin
 {
+
+static FormatModifierMap screencastFormats()
+{
+    if (const auto eglBackend = dynamic_cast<EglBackend *>(Compositor::self()->backend())) {
+        return eglBackend->openglContext()->displayObject()->nonExternalOnlySupportedDrmFormats();
+    }
+    if (const auto vulkanBackend = dynamic_cast<VulkanBackend *>(Compositor::self()->backend())) {
+        return vulkanBackend->device()->computeOutputFormats();
+    }
+    return {};
+}
 
 RegionScreenCastSource::RegionScreenCastSource(const Rect &region, qreal scale, std::optional<pid_t> pidToHide)
     : ScreenCastSource()
@@ -78,8 +95,18 @@ void RegionScreenCastSource::setRenderCursor(bool enable)
 
 Region RegionScreenCastSource::render(GLFramebuffer *target, const Region &bufferRepair)
 {
+    return render(RenderTarget(target), bufferRepair);
+}
+
+Region RegionScreenCastSource::render(VulkanRenderTarget *target, const Region &bufferRepair)
+{
+    return render(RenderTarget(target), bufferRepair);
+}
+
+Region RegionScreenCastSource::render(const RenderTarget &target, const Region &bufferRepair)
+{
     m_last = std::chrono::steady_clock::now().time_since_epoch();
-    m_layer->setFramebuffer(target, bufferRepair & Rect(QPoint(), target->size()));
+    m_layer->setRenderTarget(target, bufferRepair & Rect(QPoint(), target.size()));
     if (!m_layer->preparePresentationTest()) {
         return Region{};
     }
@@ -88,7 +115,7 @@ Region RegionScreenCastSource::render(GLFramebuffer *target, const Region &buffe
         return Region{};
     }
     m_sceneView->prePaint();
-    const auto bufferDamage = (m_layer->deviceRepaints() | m_sceneView->collectDamage()) & Rect(QPoint(), target->size());
+    const auto bufferDamage = (m_layer->deviceRepaints() | m_sceneView->collectDamage()) & Rect(QPoint(), target.size());
     const auto repaints = beginInfo->repaint | bufferDamage;
     m_layer->resetRepaints();
     m_sceneView->paint(beginInfo->renderTarget, QPoint(), repaints);
@@ -101,6 +128,27 @@ Region RegionScreenCastSource::render(GLFramebuffer *target, const Region &buffe
 
 Region RegionScreenCastSource::render(QImage *target, const Region &bufferRepair)
 {
+    if (const auto vulkanBackend = dynamic_cast<VulkanBackend *>(Compositor::self()->backend())) {
+        const auto texture = VulkanTexture::allocate(vulkanBackend->device(),
+                                                     vk::Format::eR8G8B8A8Unorm,
+                                                     target->size(),
+                                                     vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+                                                     VulkanQueueRole::Compute);
+        if (!texture) {
+            return Region{};
+        }
+        VulkanRenderTarget vulkanTarget(texture.get());
+        const Region ret = render(RenderTarget(&vulkanTarget), Region::infinite());
+        const QImage image = texture->download();
+        if (image.isNull()) {
+            return Region{};
+        }
+        QPainter painter(target);
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.drawImage(QPoint(), image);
+        return ret;
+    }
+
     auto texture = GLTexture::allocate(GL_RGBA8, target->size());
     if (!texture) {
         return Region{};
@@ -151,7 +199,7 @@ void RegionScreenCastSource::resume()
         return;
     }
 
-    m_layer = std::make_unique<ScreencastLayer>(workspace()->outputs().front(), static_cast<EglBackend *>(Compositor::self()->backend())->openglContext()->displayObject()->nonExternalOnlySupportedDrmFormats());
+    m_layer = std::make_unique<ScreencastLayer>(workspace()->outputs().front(), screencastFormats());
 
     m_sceneView = std::make_unique<FilteredSceneView>(kwinApp()->scene(), workspace()->outputs().front(), m_layer.get(), m_pidToHide);
     m_sceneView->setViewport(m_region);

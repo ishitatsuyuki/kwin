@@ -700,6 +700,8 @@ void Options::loadConfig()
     QString compositingBackend = config.readEntry("Backend", "OpenGL");
     if (compositingBackend == "QPainter") {
         compositingMode = QPainterCompositing;
+    } else if (compositingBackend == "Vulkan") {
+        compositingMode = VulkanCompositing;
     } else {
         compositingMode = OpenGLCompositing;
     }
@@ -713,6 +715,10 @@ void Options::loadConfig()
         case 'Q':
             qCDebug(KWIN_CORE) << "Compositing forced to QPainter mode by environment variable";
             compositingMode = QPainterCompositing;
+            break;
+        case 'V':
+            qCDebug(KWIN_CORE) << "Compositing forced to Vulkan compute mode by environment variable";
+            compositingMode = VulkanCompositing;
             break;
         default:
             qCDebug(KWIN_CORE) << "Unknown KWIN_COMPOSE mode set, ignoring";

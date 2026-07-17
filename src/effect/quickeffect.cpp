@@ -207,7 +207,8 @@ QuickSceneEffect::~QuickSceneEffect()
 
 bool QuickSceneEffect::supported()
 {
-    return effects->compositingType() == OpenGLCompositing;
+    return effects->compositingType() == OpenGLCompositing
+        || effects->compositingType() == VulkanCompositing;
 }
 
 void QuickSceneEffect::checkItemDraggedOutOfScreen(QQuickItem *item)

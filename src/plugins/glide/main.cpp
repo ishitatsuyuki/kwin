@@ -6,6 +6,8 @@
 
 #include "glide.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

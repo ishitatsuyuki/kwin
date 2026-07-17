@@ -66,7 +66,8 @@ InvertEffect::~InvertEffect() = default;
 
 bool InvertEffect::supported()
 {
-    return effects->compositingType() == OpenGLCompositing;
+    return effects->compositingType() == OpenGLCompositing
+        || effects->compositingType() == VulkanCompositing;
 }
 
 bool InvertEffect::isInvertable(EffectWindow *window) const
@@ -84,7 +85,11 @@ void InvertEffect::invert(EffectWindow *window)
     }
 
     redirect(window);
-    setShader(window, m_shader.get());
+    if (effects->compositingType() == VulkanCompositing) {
+        setVulkanInvert(window);
+    } else {
+        setShader(window, m_shader.get());
+    }
 }
 
 void InvertEffect::uninvert(EffectWindow *window)
@@ -96,6 +101,10 @@ bool InvertEffect::loadData()
 {
     ensureResources();
     m_inited = true;
+
+    if (effects->compositingType() == VulkanCompositing) {
+        return true;
+    }
 
     m_shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture, QString(), QStringLiteral(":/effects/invert/shaders/invert.frag"));
     if (!m_shader) {

@@ -14,14 +14,18 @@
 #include "magnifierconfig.h"
 
 #include <QAction>
+#include <QPainter>
 #include <QTimer>
 
 #include <KStandardActions>
 
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
+#include "effect/vulkanscreencapture.h"
 #include "opengl/eglcontext.h"
 #include "opengl/glutils.h"
+#include "scene/itemrenderer_vulkan.h"
+#include "scene/workspacescene.h"
 #include "utils/keys.h"
 #include <KGlobalAccel>
 
@@ -95,7 +99,8 @@ MagnifierEffect::~MagnifierEffect()
 
 bool MagnifierEffect::supported()
 {
-    return effects->openglContext() && effects->openglContext()->supportsBlits();
+    return effects->compositingType() == VulkanCompositing
+        || (effects->openglContext() && effects->openglContext()->supportsBlits());
 }
 
 void MagnifierEffect::reconfigure(ReconfigureFlags)
@@ -148,7 +153,7 @@ void MagnifierEffect::prePaintScreen(ScreenPrePaintData &data)
         // zoom ended - delete FBO and texture
         m_fbo.reset();
         m_texture.reset();
-    } else if (!m_texture || m_texture->size() != m_magnifierSize) {
+    } else if (effects->isOpenGLCompositing() && (!m_texture || m_texture->size() != m_magnifierSize)) {
         if (auto texture = GLTexture::allocate(GL_RGBA16F, m_magnifierSize)) {
             texture->setWrapMode(GL_CLAMP_TO_EDGE);
             texture->setFilter(GL_LINEAR);
@@ -167,12 +172,70 @@ void MagnifierEffect::prePaintScreen(ScreenPrePaintData &data)
     effects->prePaintScreen(data);
     if (m_zoom != 1.0) {
         data.paint += visibleArea();
+        if (effects->compositingType() == VulkanCompositing) {
+            // The Vulkan magnifier captures the collected scene layers rather
+            // than blitting an already rasterized framebuffer.
+            data.mask |= PAINT_SCREEN_TRANSFORMED;
+        }
     }
 }
 
 void MagnifierEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
     effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen); // paint normal screen
+    if (effects->compositingType() == VulkanCompositing && m_zoom != 1.0) {
+        auto renderer = dynamic_cast<ItemRendererVulkan *>(effects->scene()->renderer());
+        if (!renderer) {
+            return;
+        }
+        if (!m_vulkanCapture) {
+            m_vulkanCapture = std::make_unique<VulkanScreenCapture>(renderer->device());
+        }
+        VulkanTexture *texture = m_vulkanCapture->capture(renderer, renderTarget.size(), renderTarget.colorDescription());
+        if (!texture) {
+            return;
+        }
+
+        const Rect area = magnifierArea();
+        const QPointF cursor = cursorPos();
+        const RectF source(cursor.x() - double(area.width()) / (m_zoom * 2),
+                           cursor.y() - double(area.height()) / (m_zoom * 2),
+                           double(area.width()) / m_zoom,
+                           double(area.height()) / m_zoom);
+        const auto mapPoint = [&viewport](const QPointF &point) {
+            return viewport.mapToRenderTarget(point);
+        };
+        const std::array vertices{
+            mapPoint(area.topLeft()),
+            mapPoint(area.topRight()),
+            mapPoint(area.bottomRight()),
+            mapPoint(area.bottomLeft()),
+        };
+        const QSizeF targetSize(renderTarget.size());
+        const std::array textureCoordinates{
+            QPointF(mapPoint(source.topLeft()).x() / targetSize.width(), mapPoint(source.topLeft()).y() / targetSize.height()),
+            QPointF(mapPoint(source.topRight()).x() / targetSize.width(), mapPoint(source.topRight()).y() / targetSize.height()),
+            QPointF(mapPoint(source.bottomRight()).x() / targetSize.width(), mapPoint(source.bottomRight()).y() / targetSize.height()),
+            QPointF(mapPoint(source.bottomLeft()).x() / targetSize.width(), mapPoint(source.bottomLeft()).y() / targetSize.height()),
+        };
+        renderer->renderTextureQuad(texture,
+                                    vertices,
+                                    textureCoordinates,
+                                    QRectF(QPointF(), targetSize),
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    renderTarget.colorDescription());
+
+        if (QPainter *painter = renderer->painter()) {
+            const QRectF outer = QRectF(area).adjusted(-FRAME_WIDTH, -FRAME_WIDTH, FRAME_WIDTH, FRAME_WIDTH);
+            painter->fillRect(QRectF(outer.left(), outer.top(), outer.width(), FRAME_WIDTH), Qt::black);
+            painter->fillRect(QRectF(outer.left(), area.bottom(), outer.width(), FRAME_WIDTH), Qt::black);
+            painter->fillRect(QRectF(outer.left(), area.top(), FRAME_WIDTH, area.height()), Qt::black);
+            painter->fillRect(QRectF(area.right(), area.top(), FRAME_WIDTH, area.height()), Qt::black);
+        }
+        return;
+    }
     if (m_zoom != 1.0 && m_fbo) {
         // get the right area from the current rendered screen
         const Rect area = magnifierArea();

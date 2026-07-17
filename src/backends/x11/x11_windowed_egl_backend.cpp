@@ -71,8 +71,8 @@ bool X11WindowedEglPrimaryLayer::doEndFrame(const Region &renderedDeviceRegion, 
     m_query->end();
     frame->addRenderTimeQuery(std::move(m_query));
     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
+    m_output->setPrimaryBuffer(m_buffer->buffer(), releaseFence.fileDescriptor().duplicate());
     m_swapchain->release(m_buffer, releaseFence.fileDescriptor().duplicate());
-    m_output->setPrimaryBuffer(m_buffer->buffer());
     return true;
 }
 

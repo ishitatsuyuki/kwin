@@ -19,12 +19,28 @@
 #include "opengl/glframebuffer.h"
 #include "opengl/gltexture.h"
 #include "scene/workspacescene.h"
+#include "vulkan/vulkan_backend.h"
+#include "vulkan/vulkan_device.h"
+#include "vulkan/vulkan_rendertarget.h"
+#include "vulkan/vulkan_texture.h"
 #include "workspace.h"
 
+#include <QPainter>
 #include <drm_fourcc.h>
 
 namespace KWin
 {
+
+static FormatModifierMap screencastFormats()
+{
+    if (const auto eglBackend = dynamic_cast<EglBackend *>(Compositor::self()->backend())) {
+        return eglBackend->openglContext()->displayObject()->nonExternalOnlySupportedDrmFormats();
+    }
+    if (const auto vulkanBackend = dynamic_cast<VulkanBackend *>(Compositor::self()->backend())) {
+        return vulkanBackend->device()->computeOutputFormats();
+    }
+    return {};
+}
 
 OutputScreenCastSource::OutputScreenCastSource(LogicalOutput *output, std::optional<pid_t> pidToHide)
     : ScreenCastSource()
@@ -68,6 +84,27 @@ void OutputScreenCastSource::setRenderCursor(bool enable)
 
 Region OutputScreenCastSource::render(QImage *target, const Region &bufferRepair)
 {
+    if (const auto vulkanBackend = dynamic_cast<VulkanBackend *>(Compositor::self()->backend())) {
+        const auto texture = VulkanTexture::allocate(vulkanBackend->device(),
+                                                     vk::Format::eR8G8B8A8Unorm,
+                                                     target->size(),
+                                                     vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+                                                     VulkanQueueRole::Compute);
+        if (!texture) {
+            return Region{};
+        }
+        VulkanRenderTarget vulkanTarget(texture.get());
+        const Region ret = render(RenderTarget(&vulkanTarget), Region::infinite());
+        const QImage image = texture->download();
+        if (image.isNull()) {
+            return Region{};
+        }
+        QPainter painter(target);
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.drawImage(QPoint(), image);
+        return ret;
+    }
+
     auto texture = GLTexture::allocate(GL_RGBA8, target->size());
     if (!texture) {
         return Region{};
@@ -80,7 +117,17 @@ Region OutputScreenCastSource::render(QImage *target, const Region &bufferRepair
 
 Region OutputScreenCastSource::render(GLFramebuffer *target, const Region &bufferRepair)
 {
-    m_layer->setFramebuffer(target, bufferRepair & Rect(QPoint(), target->size()));
+    return render(RenderTarget(target), bufferRepair);
+}
+
+Region OutputScreenCastSource::render(VulkanRenderTarget *target, const Region &bufferRepair)
+{
+    return render(RenderTarget(target), bufferRepair);
+}
+
+Region OutputScreenCastSource::render(const RenderTarget &target, const Region &bufferRepair)
+{
+    m_layer->setRenderTarget(target, bufferRepair & Rect(QPoint(), target.size()));
     if (!m_layer->preparePresentationTest()) {
         return Region{};
     }
@@ -89,7 +136,7 @@ Region OutputScreenCastSource::render(GLFramebuffer *target, const Region &buffe
         return Region{};
     }
     m_sceneView->prePaint();
-    const auto bufferDamage = (m_layer->deviceRepaints() | m_sceneView->collectDamage()) & Rect(QPoint(), target->size());
+    const auto bufferDamage = (m_layer->deviceRepaints() | m_sceneView->collectDamage()) & Rect(QPoint(), target.size());
     const auto repaints = beginInfo->repaint | bufferDamage;
     m_layer->resetRepaints();
     m_sceneView->paint(beginInfo->renderTarget, QPoint(), repaints);
@@ -116,7 +163,7 @@ void OutputScreenCastSource::resume()
         return;
     }
 
-    m_layer = std::make_unique<ScreencastLayer>(m_output, static_cast<EglBackend *>(Compositor::self()->backend())->openglContext()->displayObject()->nonExternalOnlySupportedDrmFormats());
+    m_layer = std::make_unique<ScreencastLayer>(m_output, screencastFormats());
 
     m_sceneView = std::make_unique<FilteredSceneView>(kwinApp()->scene(), m_output, m_layer.get(), m_pidToHide);
     m_sceneView->setViewport(m_output->geometryF());

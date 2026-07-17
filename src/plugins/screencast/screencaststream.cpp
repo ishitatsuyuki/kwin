@@ -24,19 +24,41 @@
 #include "scene/workspacescene.h"
 #include "screencastbuffer.h"
 #include "screencastsource.h"
+#include "vulkan/vulkan_backend.h"
+#include "vulkan/vulkan_device.h"
+#include "vulkan/vulkan_rendertarget.h"
 
 #include <KLocalizedString>
 
 #include <QLoggingCategory>
 #include <QPainter>
 #include <QScopeGuard>
+#include <cerrno>
 
 #include <libdrm/drm_fourcc.h>
 #include <spa/buffer/meta.h>
 #include <spa/pod/dynamic.h>
+#include <sys/poll.h>
 
 namespace KWin
 {
+
+static bool waitForFence(const FileDescriptor &fence)
+{
+    if (!fence.isValid()) {
+        return false;
+    }
+    pollfd pfd{
+        .fd = fence.get(),
+        .events = POLLIN,
+        .revents = 0,
+    };
+    int ret;
+    do {
+        ret = poll(&pfd, 1, -1);
+    } while (ret < 0 && errno == EINTR);
+    return ret == 1 && (pfd.revents & POLLIN);
+}
 
 static const struct
 {
@@ -372,9 +394,9 @@ bool ScreenCastStream::init()
         return false;
     }
 
-    EglBackend *backend = qobject_cast<EglBackend *>(Compositor::self()->backend());
-    if (!backend) {
-        m_error = i18n("OpenGL compositing is required for screencasting");
+    RenderBackend *backend = Compositor::self()->backend();
+    if (!qobject_cast<EglBackend *>(backend) && !qobject_cast<VulkanBackend *>(backend)) {
+        m_error = i18n("OpenGL or Vulkan compositing is required for screencasting");
         return false;
     }
 
@@ -575,8 +597,9 @@ pw_buffer *ScreenCastStream::dequeueBuffer()
 
 void ScreenCastStream::record(Contents contents)
 {
-    EglBackend *backend = qobject_cast<EglBackend *>(Compositor::self()->backend());
-    if (!backend) {
+    EglBackend *eglBackend = qobject_cast<EglBackend *>(Compositor::self()->backend());
+    VulkanBackend *vulkanBackend = qobject_cast<VulkanBackend *>(Compositor::self()->backend());
+    if (!eglBackend && !vulkanBackend) {
         return;
     }
 
@@ -608,8 +631,10 @@ void ScreenCastStream::record(Contents contents)
         break;
     }
 
-    EglContext *context = backend->openglContext();
-    context->makeCurrent();
+    EglContext *context = eglBackend ? eglBackend->openglContext() : nullptr;
+    if (context) {
+        context->makeCurrent();
+    }
 
     spa_meta_sync_timeline *synctmeta = nullptr;
 
@@ -624,13 +649,23 @@ void ScreenCastStream::record(Contents contents)
                                                                                             SPA_META_SyncTimeline,
                                                                                             sizeof(spa_meta_sync_timeline)));
                 FileDescriptor syncFileFd = dmabuf->synctimeline->exportSyncFile(synctmeta->release_point);
-                EGLNativeFence fence = EGLNativeFence::importFence(backend->eglDisplayObject(), std::move(syncFileFd));
-                if (fence.waitSync() != EGL_TRUE) {
-                    qCWarning(KWIN_SCREENCAST) << objectName() << "Failed to wait on a fence, recording may be corrupted";
+                if (eglBackend) {
+                    EGLNativeFence fence = EGLNativeFence::importFence(eglBackend->eglDisplayObject(), std::move(syncFileFd));
+                    if (fence.waitSync() != EGL_TRUE) {
+                        qCWarning(KWIN_SCREENCAST) << objectName() << "Failed to wait on a fence, recording may be corrupted";
+                    }
+                } else {
+                    dmabuf->vulkanTarget->setAcquireFence(std::move(syncFileFd));
                 }
             }
 
-            damage = m_source->render(dmabuf->framebuffer.get(), m_damageJournal.accumulate(dmabuf->m_age, Region::infinite()));
+            const Region repair = m_damageJournal.accumulate(dmabuf->m_age, Region::infinite());
+            damage = eglBackend
+                ? m_source->render(dmabuf->framebuffer.get(), repair)
+                : m_source->render(dmabuf->vulkanTarget.get(), repair);
+            if (dmabuf->vulkanTarget) {
+                dmabuf->vulkanTarget->takeRenderTimeQueries();
+            }
             bumpBufferAge(dmabuf);
         }
         m_damageJournal.add(damage);
@@ -638,19 +673,35 @@ void ScreenCastStream::record(Contents contents)
 
     if (spa_data[0].type == SPA_DATA_DmaBuf) {
         if (synctmeta) {
-            EGLNativeFence fence(backend->eglDisplayObject());
-
             synctmeta->acquire_point = synctmeta->release_point + 1;
             synctmeta->release_point = synctmeta->acquire_point + 1;
 
             auto dmabuf = static_cast<DmaBufScreenCastBuffer *>(buffer);
-            dmabuf->synctimeline->moveInto(synctmeta->acquire_point, fence.takeFileDescriptor());
-        } else {
-            // Implicit sync is broken on Nvidia and with llvmpipe
-            if (context->glPlatform()->isNvidia() || context->isSoftwareRenderer()) {
-                glFinish();
+            if (eglBackend) {
+                EGLNativeFence fence(eglBackend->eglDisplayObject());
+                dmabuf->synctimeline->moveInto(synctmeta->acquire_point, fence.takeFileDescriptor());
             } else {
-                glFlush();
+                FileDescriptor completionFence = dmabuf->vulkanTarget->takeCompletionFence();
+                if (completionFence.isValid()) {
+                    dmabuf->synctimeline->moveInto(synctmeta->acquire_point, completionFence);
+                } else {
+                    dmabuf->synctimeline->signal(synctmeta->acquire_point);
+                }
+            }
+        } else {
+            if (eglBackend) {
+                // Implicit sync is broken on Nvidia and with llvmpipe
+                if (context->glPlatform()->isNvidia() || context->isSoftwareRenderer()) {
+                    glFinish();
+                } else {
+                    glFlush();
+                }
+            } else if (effectiveContents & Content::Video) {
+                const auto dmabuf = static_cast<DmaBufScreenCastBuffer *>(buffer);
+                const FileDescriptor completionFence = dmabuf->vulkanTarget->takeCompletionFence();
+                if (!waitForFence(completionFence)) {
+                    qCWarning(KWIN_SCREENCAST) << objectName() << "Failed to wait for Vulkan rendering, recording may be corrupted";
+                }
             }
         }
     }
@@ -879,12 +930,12 @@ void ScreenCastStream::setCursorMode(ScreencastV1Interface::CursorMode mode)
 
 std::optional<ScreenCastDmaBufTextureParams> ScreenCastStream::testCreateDmaBuf(const QSize &size, quint32 format, const ModifierList &modifiers)
 {
-    EglBackend *backend = qobject_cast<EglBackend *>(Compositor::self()->backend());
-    if (!backend) {
+    RenderBackend *renderBackend = Compositor::self()->backend();
+    if (!renderBackend->drmDevice()) {
         return std::nullopt;
     }
 
-    GraphicsBuffer *buffer = backend->drmDevice()->allocator()->allocate(GraphicsBufferOptions{
+    GraphicsBuffer *buffer = renderBackend->drmDevice()->allocator()->allocate(GraphicsBufferOptions{
         .size = size,
         .format = format,
         .modifiers = modifiers,
@@ -901,19 +952,28 @@ std::optional<ScreenCastDmaBufTextureParams> ScreenCastStream::testCreateDmaBuf(
         return std::nullopt;
     }
 
-    // Also test if we can actually create the framebuffer,
-    // since this may fail on some drivers with some modifiers
-    // (namely Nvidia with the implicit modifier)
-    if (!backend->openglContext()->makeCurrent()) {
-        return std::nullopt;
-    }
-
-    auto texture = backend->importDmaBufAsTexture(*attrs);
-    if (!texture) {
-        return std::nullopt;
-    }
-    auto framebuffer = std::make_unique<GLFramebuffer>(texture.get());
-    if (!framebuffer->valid()) {
+    if (const auto eglBackend = qobject_cast<EglBackend *>(renderBackend)) {
+        // Also test if we can actually create the framebuffer, since this may
+        // fail on some drivers with some modifiers (notably Nvidia implicit).
+        if (!eglBackend->openglContext()->makeCurrent()) {
+            return std::nullopt;
+        }
+        auto texture = eglBackend->importDmaBufAsTexture(*attrs);
+        if (!texture) {
+            return std::nullopt;
+        }
+        const auto framebuffer = std::make_unique<GLFramebuffer>(texture.get());
+        if (!framebuffer->valid()) {
+            return std::nullopt;
+        }
+    } else if (const auto vulkanBackend = qobject_cast<VulkanBackend *>(renderBackend)) {
+        const auto texture = vulkanBackend->device()->importBuffer(buffer,
+                                                                   VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                                                                       | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        if (!texture) {
+            return std::nullopt;
+        }
+    } else {
         return std::nullopt;
     }
 
@@ -923,7 +983,7 @@ std::optional<ScreenCastDmaBufTextureParams> ScreenCastStream::testCreateDmaBuf(
         .height = attrs->height,
         .format = attrs->format,
         .modifier = attrs->modifier,
-        .supportsSyncObj = backend->drmDevice()->supportsSyncObjTimelines(),
+        .supportsSyncObj = renderBackend->drmDevice()->supportsSyncObjTimelines(),
     };
 }
 

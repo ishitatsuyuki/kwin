@@ -18,6 +18,7 @@ class GLFramebuffer;
 class GLTexture;
 class RectF;
 class Region;
+class VulkanRenderTarget;
 
 class ScreenCastSource : public QObject
 {
@@ -33,6 +34,7 @@ public:
 
     virtual void setRenderCursor(bool enable) = 0;
     virtual Region render(GLFramebuffer *target, const Region &bufferRepair) = 0;
+    virtual Region render(VulkanRenderTarget *target, const Region &bufferRepair) = 0;
     virtual Region render(QImage *target, const Region &bufferRepair) = 0;
     virtual std::chrono::nanoseconds clock() const = 0;
 

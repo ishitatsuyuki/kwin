@@ -13,6 +13,7 @@
 // KWin
 #include "effect/effect.h"
 #include "effect/effecthandler.h"
+#include "effect/effectpluginfactory.h"
 #include "plugin.h"
 #include "scripting/scriptedeffect.h"
 #include "scripting/scriptedquicksceneeffect.h"

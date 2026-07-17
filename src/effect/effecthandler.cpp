@@ -1399,16 +1399,14 @@ QString EffectsHandler::debug(const QString &name, const QString &parameter) con
 
 bool EffectsHandler::makeOpenGLContextCurrent()
 {
-    if (!isOpenGLCompositing()) {
-        return false;
-    }
-    return m_scene->openglContext()->makeCurrent();
+    EglContext *context = m_scene->openglContext();
+    return context && context->makeCurrent();
 }
 
 void EffectsHandler::doneOpenGLContextCurrent()
 {
-    if (isOpenGLCompositing()) {
-        m_scene->openglContext()->doneCurrent();
+    if (EglContext *context = m_scene->openglContext()) {
+        context->doneCurrent();
     }
 }
 

@@ -125,7 +125,8 @@ void ShowFpsEffect::postPaintScreen()
 
 bool ShowFpsEffect::supported()
 {
-    return effects->isOpenGLCompositing();
+    return effects->isOpenGLCompositing()
+        || effects->compositingType() == VulkanCompositing;
 }
 
 } // namespace KWin

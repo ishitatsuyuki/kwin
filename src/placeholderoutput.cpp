@@ -5,6 +5,7 @@
 */
 
 #include "placeholderoutput.h"
+#include "core/renderloop.h"
 
 namespace KWin
 {

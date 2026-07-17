@@ -34,6 +34,7 @@ class KWIN_EXPORT DecorationBridge : public KDecoration3::DecorationBridge
 
 public:
     explicit DecorationBridge();
+    ~DecorationBridge() override;
 
     static bool hasPlugin();
 

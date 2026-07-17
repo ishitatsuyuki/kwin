@@ -9,6 +9,7 @@
 */
 #pragma once
 
+#include "core/colorspace.h"
 #include "core/output.h"
 #include "core/rect.h"
 #include "cursor.h"

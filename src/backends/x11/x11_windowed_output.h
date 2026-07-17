@@ -9,6 +9,8 @@
 #pragma once
 
 #include "core/backendoutput.h"
+#include "core/region.h"
+#include "utils/filedescriptor.h"
 #include <kwin_export.h>
 
 #include <QObject>
@@ -18,6 +20,7 @@
 #include <unordered_map>
 
 #include <xcb/present.h>
+#include <xcb/sync.h>
 #include <xcb/xcb.h>
 
 class NETWinInfo;
@@ -113,7 +116,7 @@ public:
     void handlePresentCompleteNotify(xcb_present_complete_notify_event_t *event);
     void handlePresentIdleNotify(xcb_present_idle_notify_event_t *event);
 
-    void setPrimaryBuffer(GraphicsBuffer *buffer);
+    void setPrimaryBuffer(GraphicsBuffer *buffer, FileDescriptor &&acquireFence = {});
     bool testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
     bool present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame) override;
 
@@ -130,6 +133,8 @@ private:
     xcb_window_t m_window = XCB_WINDOW_NONE;
     xcb_present_event_t m_presentEvent = XCB_NONE;
     xcb_pixmap_t m_pendingBuffer = XCB_PIXMAP_NONE;
+    xcb_sync_fence_t m_pendingWaitFence = XCB_NONE;
+    xcb_sync_fence_t m_presentWaitFence = XCB_NONE;
     std::unique_ptr<NETWinInfo> m_winInfo;
     std::unique_ptr<RenderLoop> m_renderLoop;
     std::unique_ptr<X11WindowedCursor> m_cursor;

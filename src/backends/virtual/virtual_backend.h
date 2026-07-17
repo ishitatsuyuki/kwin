@@ -19,6 +19,7 @@ class VirtualBackend;
 class VirtualOutput;
 class DrmDevice;
 class RenderDevice;
+class VulkanBackend;
 
 class KWIN_EXPORT VirtualBackend : public OutputBackend
 {
@@ -32,6 +33,7 @@ public:
 
     std::unique_ptr<QPainterBackend> createQPainterBackend() override;
     std::unique_ptr<EglBackend> createOpenGLBackend() override;
+    std::unique_ptr<VulkanBackend> createVulkanBackend() override;
 
     BackendOutput *createVirtualOutput(const QString &name, const QString &description, const QSize &size, qreal scale) override;
     void removeVirtualOutput(BackendOutput *output) override;

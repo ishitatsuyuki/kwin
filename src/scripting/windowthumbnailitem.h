@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <QImage>
 #include <QQuickItem>
 #include <QUuid>
 
@@ -35,6 +36,7 @@ public:
     {
         std::shared_ptr<GLTexture> texture;
         GLsync fence;
+        QImage image;
     };
 
     Frame acquire();
@@ -50,6 +52,7 @@ private:
 
     std::shared_ptr<GLTexture> m_offscreenTexture;
     std::unique_ptr<GLFramebuffer> m_offscreenTarget;
+    QImage m_offscreenImage;
     GLsync m_acquireFence = 0;
     bool m_dirty = true;
 };

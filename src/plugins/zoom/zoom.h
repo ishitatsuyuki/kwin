@@ -26,6 +26,7 @@ class GLFramebuffer;
 class GLTexture;
 class GLVertexBuffer;
 class GLShader;
+class VulkanScreenCapture;
 class FocusTracker;
 class TextCaretTracker;
 
@@ -87,6 +88,7 @@ private:
     {
         std::unique_ptr<GLTexture> texture;
         std::unique_ptr<GLFramebuffer> framebuffer;
+        std::unique_ptr<VulkanScreenCapture> vulkanCapture;
         RectF viewport;
         std::shared_ptr<ColorDescription> color = ColorDescription::sRGB;
     };

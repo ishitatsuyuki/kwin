@@ -21,6 +21,7 @@
 #include <QFile>
 #include <QGuiApplication>
 #include <QTimer>
+#include <QUrl>
 
 #include <canberra.h>
 
@@ -138,7 +139,8 @@ void SystemBellEffect::reconfigure(ReconfigureFlags flags)
 
 bool SystemBellEffect::supported()
 {
-    return effects->compositingType() == OpenGLCompositing;
+    return effects->compositingType() == OpenGLCompositing
+        || effects->compositingType() == VulkanCompositing;
 }
 
 void SystemBellEffect::flash(EffectWindow *window)
@@ -151,7 +153,15 @@ void SystemBellEffect::flash(EffectWindow *window)
     }
 
     redirect(window);
-    setShader(window, m_shader.get());
+    if (effects->compositingType() == VulkanCompositing) {
+        if (m_mode == Invert) {
+            setVulkanInvert(window);
+        } else {
+            setVulkanColor(window, m_color);
+        }
+    } else {
+        setShader(window, m_shader.get());
+    }
 }
 
 void SystemBellEffect::unflash(EffectWindow *window)
@@ -163,6 +173,10 @@ bool SystemBellEffect::loadData()
 {
     ensureResources();
     m_inited = true;
+
+    if (effects->compositingType() == VulkanCompositing) {
+        return true;
+    }
 
     if (m_visibleBell) {
         if (m_mode == Invert) {

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "core/backendoutput.h"
+#include "utils/filedescriptor.h"
 
 #include <KWayland/Client/xdgshell.h>
 #include <QObject>
@@ -43,6 +44,7 @@ namespace KWin
 {
 
 class OutputFrame;
+class GraphicsBuffer;
 namespace WaylandClient
 {
 
@@ -55,6 +57,7 @@ namespace Wayland
 
 class WaylandBackend;
 class ColorSurfaceFeedback;
+class WaylandExplicitSync;
 
 class WaylandCursor
 {
@@ -66,7 +69,11 @@ public:
     void setPointer(KWayland::Client::Pointer *pointer);
 
     void setEnabled(bool enable);
-    void update(wl_buffer *buffer, const QSize &logicalSize, const QPoint &hotspot);
+    void update(wl_buffer *buffer,
+                const QSize &logicalSize,
+                const QPoint &hotspot,
+                GraphicsBuffer *graphicsBuffer = nullptr,
+                FileDescriptor &&acquireFence = {});
 
 private:
     void sync();
@@ -78,6 +85,9 @@ private:
     QPoint m_hotspot;
     QSize m_size;
     bool m_enabled = true;
+    GraphicsBuffer *m_graphicsBuffer = nullptr;
+    FileDescriptor m_acquireFence;
+    std::unique_ptr<WaylandExplicitSync> m_explicitSync;
 };
 
 class WaylandOutput : public BackendOutput

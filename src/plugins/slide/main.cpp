@@ -6,6 +6,8 @@
 
 #include "slide.h"
 
+#include "effect/effectpluginfactory.h"
+
 namespace KWin
 {
 

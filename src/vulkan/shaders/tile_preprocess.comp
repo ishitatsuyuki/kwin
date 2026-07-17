@@ -1,0 +1,103 @@
+#version 450
+
+// One invocation owns one Pathfinder-style 16x16 tile. The initial
+// implementation deliberately tests every layer AABB and stores a per-tile
+// list of intersecting layer indices. Later implementations can replace this
+// pass with hierarchical binning without changing the composition pass.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct Layer
+{
+    vec4 rect;
+    vec4 color;
+    vec4 sourceRect;
+    vec4 localRect;
+    vec4 inverseTransformX;
+    vec4 inverseTransformY;
+    vec4 clipRect;
+    vec4 textureTransformX;
+    vec4 textureTransformY;
+    vec4 effects;
+    vec4 roundedRect;
+    vec4 cornerRadii;
+    vec4 colorTransformX;
+    vec4 colorTransformY;
+    vec4 colorTransformZ;
+    vec4 transferParameters;
+    vec4 colorParameters;
+    vec4 destinationToLmsX;
+    vec4 destinationToLmsY;
+    vec4 destinationToLmsZ;
+    vec4 lmsToDestinationX;
+    vec4 lmsToDestinationY;
+    vec4 lmsToDestinationZ;
+    vec4 toneMappingParameters;
+    vec4 yuvTransformX;
+    vec4 yuvTransformY;
+    vec4 yuvTransformZ;
+    vec4 quadPositionX;
+    vec4 quadPositionY;
+    vec4 quadTextureX;
+    vec4 quadTextureY;
+    vec4 colorFilterMatrixX;
+    vec4 colorFilterMatrixY;
+    vec4 colorFilterMatrixZ;
+    vec4 colorFilterParameters;
+    uvec4 textureIndices;
+    uvec4 metadata;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer LayerBuffer
+{
+    Layer layers[];
+};
+
+layout(std430, set = 0, binding = 1) writeonly buffer TileBuffer
+{
+    uint tileData[];
+};
+
+layout(std430, set = 0, binding = 4) readonly buffer DirtyTileBuffer
+{
+    uint dirtyTiles[];
+};
+
+layout(push_constant) uniform Parameters
+{
+    uint layerCount;
+    uint tilesWide;
+    uint flags;
+    uint dirtyTileCount;
+    vec4 background;
+    uint firstLayer;
+    uint lastLayer;
+    uvec2 padding;
+    vec4 outputLutParameters;
+} params;
+
+void main()
+{
+    uint dirtyTileIndex = gl_GlobalInvocationID.x;
+    if (dirtyTileIndex >= params.dirtyTileCount) {
+        return;
+    }
+    uint tileIndex = dirtyTiles[dirtyTileIndex];
+
+    uint tileX = tileIndex % params.tilesWide;
+    uint tileY = tileIndex / params.tilesWide;
+    vec2 tileMin = vec2(tileX, tileY) * 16.0;
+    vec2 tileMax = tileMin + vec2(16.0);
+    uint listBase = tileIndex * (params.layerCount + 1u);
+    uint count = 0u;
+
+    for (uint i = 0; i < params.layerCount; ++i) {
+        vec4 rect = layers[i].rect;
+        bool intersects = rect.x < tileMax.x && rect.z > tileMin.x
+            && rect.y < tileMax.y && rect.w > tileMin.y;
+        if (intersects) {
+            tileData[listBase + 1u + count] = i;
+            ++count;
+        }
+    }
+    tileData[listBase] = count;
+}

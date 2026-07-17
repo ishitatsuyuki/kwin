@@ -503,7 +503,22 @@ void TestColorspaces::testIccShader()
         openGlResult.mirror();
     }
 
+    QImage colorPipelineResult(input.size(), QImage::Format_RGBA8888_Premultiplied);
+    const ColorPipeline colorPipeline = ColorPipeline::createIcc(profile,
+                                                                 imageColorspace,
+                                                                 Colorimetry::BT709,
+                                                                 TransferFunction::gamma22,
+                                                                 intent);
+    for (int x = 0; x < input.width(); ++x) {
+        for (int y = 0; y < input.height(); ++y) {
+            const QColor source = input.pixelColor(x, y);
+            const QVector3D output = colorPipeline.evaluate(QVector3D(source.redF(), source.greenF(), source.blueF()));
+            colorPipelineResult.setPixelColor(x, y, QColor::fromRgbF(std::clamp(output.x(), 0.0f, 1.0f), std::clamp(output.y(), 0.0f, 1.0f), std::clamp(output.z(), 0.0f, 1.0f)));
+        }
+    }
+
     float maxError = 0;
+    float maxColorPipelineError = 0;
     for (int x = 0; x < input.width(); x++) {
         for (int y = 0; y < input.height(); y++) {
             const auto glPixel = openGlResult.pixel(x, y);
@@ -513,12 +528,17 @@ void TestColorspaces::testIccShader()
             const QVector3D difference = (glColors - pipeColors);
 
             maxError = std::max(difference.length(), maxError);
+            const auto colorPipelinePixel = colorPipelineResult.pixel(x, y);
+            const QVector3D colorPipelineColors(qRed(colorPipelinePixel), qGreen(colorPipelinePixel), qBlue(colorPipelinePixel));
+            maxColorPipelineError = std::max((glColors - colorPipelineColors).length(), maxColorPipelineError);
         }
     }
 
     qWarning() << "Max ICC shader error:" << maxError;
+    qWarning() << "Max ICC ColorPipeline error:" << maxColorPipelineError;
     QFETCH(int, maxAllowedError);
     QCOMPARE_LE(maxError, maxAllowedError);
+    QCOMPARE_LE(maxColorPipelineError, float(maxAllowedError));
 }
 
 void TestColorspaces::dontCrashWithWeirdHdrMetadata()

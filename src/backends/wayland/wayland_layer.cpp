@@ -11,6 +11,7 @@
 #include "wayland-client/viewporter.h"
 #include "wayland_backend.h"
 #include "wayland_display.h"
+#include "wayland_explicit_sync.h"
 #include "wayland_output.h"
 
 #include <KWayland/Client/compositor.h>
@@ -47,6 +48,7 @@ WaylandLayer::WaylandLayer(WaylandOutput *output, OutputLayerType type, int zpos
         }
     }
     m_viewport = display->viewporter()->createViewport(*m_surface);
+    m_explicitSync = std::make_unique<WaylandExplicitSync>(output->backend(), *m_surface);
 }
 
 WaylandLayer::~WaylandLayer()
@@ -77,16 +79,18 @@ bool WaylandLayer::test() const
     return true;
 }
 
-void WaylandLayer::setBuffer(GraphicsBuffer *buffer, const Region &deviceDamagedRegion)
+void WaylandLayer::setBuffer(GraphicsBuffer *buffer, const Region &deviceDamagedRegion, FileDescriptor &&acquireFence)
 {
     m_pendingBuffer = buffer;
     m_pendingDamage = deviceDamagedRegion;
+    m_pendingAcquireFence = std::move(acquireFence);
 }
 
 void WaylandLayer::commit(PresentationMode presentationMode)
 {
     if (!isEnabled()) {
         m_pendingBuffer.reset();
+        m_pendingAcquireFence = {};
         m_surface->attachBuffer((wl_buffer *)nullptr);
         m_surface->commit(KWayland::Client::Surface::CommitFlag::None);
         return;
@@ -115,8 +119,10 @@ void WaylandLayer::commit(PresentationMode presentationMode)
         }
     }
     if (m_pendingBuffer) {
-        m_surface->attachBuffer(output->backend()->importBuffer(m_pendingBuffer.buffer()));
+        GraphicsBuffer *buffer = m_pendingBuffer.buffer();
+        m_surface->attachBuffer(output->backend()->importBuffer(buffer));
         m_surface->damageBuffer(QRegion(m_pendingDamage));
+        m_explicitSync->setAcquireReleasePoints(buffer, std::move(m_pendingAcquireFence));
         // WaylandBackend::importBuffer takes care of the buffers life time from here on
         m_pendingBuffer.reset();
     }

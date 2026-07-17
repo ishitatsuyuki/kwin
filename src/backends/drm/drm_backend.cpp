@@ -24,8 +24,10 @@
 #include "drm_qpainter_backend.h"
 #include "drm_render_backend.h"
 #include "drm_virtual_output.h"
+#include "drm_vulkan_backend.h"
 #include "utils/envvar.h"
 #include "utils/udev.h"
+#include "vulkan/vulkan_device.h"
 // KF5
 #include <KCoreAddons>
 #include <KLocalizedString>
@@ -305,9 +307,22 @@ std::unique_ptr<EglBackend> DrmBackend::createOpenGLBackend()
     return std::make_unique<EglGbmBackend>(this);
 }
 
+std::unique_ptr<VulkanBackend> DrmBackend::createVulkanBackend()
+{
+    if (!primaryGpu() || !primaryGpu()->renderDevice() || !primaryGpu()->renderDevice()->vulkanDevice()) {
+        return nullptr;
+    }
+    return std::make_unique<DrmVulkanBackend>(this);
+}
+
 QList<CompositingType> DrmBackend::supportedCompositors() const
 {
-    return QList<CompositingType>{OpenGLCompositing, QPainterCompositing};
+    QList<CompositingType> compositors{OpenGLCompositing, QPainterCompositing};
+    if (primaryGpu() && primaryGpu()->renderDevice() && primaryGpu()->renderDevice()->vulkanDevice()
+        && !primaryGpu()->renderDevice()->vulkanDevice()->computeOutputFormats().value(DRM_FORMAT_ABGR8888).isEmpty()) {
+        compositors.insert(1, VulkanCompositing);
+    }
+    return compositors;
 }
 
 QString DrmBackend::supportInformation() const

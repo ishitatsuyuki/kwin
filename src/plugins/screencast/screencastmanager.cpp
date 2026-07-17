@@ -43,7 +43,8 @@ ScreencastManager::ScreencastManager()
 static bool isSupportedCompositingType()
 {
     if (auto backend = Compositor::self()->backend()) {
-        return backend->compositingType() == OpenGLCompositing;
+        return backend->compositingType() == OpenGLCompositing
+            || backend->compositingType() == VulkanCompositing;
     }
     return false;
 }
