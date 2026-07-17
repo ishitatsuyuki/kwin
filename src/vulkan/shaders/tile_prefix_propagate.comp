@@ -1,0 +1,93 @@
+#version 450
+
+// Propagate the row and column boundary state produced by the local 16x16
+// scans. Horizontal and vertical jobs are independent and share one dispatch.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 7) readonly buffer PrefixBuffer
+{
+    uint prefixData[];
+};
+
+// The first section stores one left carry per (bin column, tile row). The
+// second stores one top carry per (tile column, bin row). Entries are pairs of
+// uints (present, opaque).
+layout(std430, set = 0, binding = 8) writeonly buffer CarryBuffer
+{
+    uint carryData[];
+};
+
+layout(push_constant) uniform Parameters
+{
+    uint layerCount;
+    uint tilesWide;
+    uint flags;
+    uint dirtyTileCount;
+    vec4 background;
+    uint firstLayer;
+    uint lastLayer;
+    uvec2 outputSize;
+    vec4 outputLutParameters;
+} params;
+
+uvec2 localValue(uint x, uint y, uint word, uint wordCount)
+{
+    uint tileIndex = y * params.tilesWide + x;
+    uint base = (tileIndex * wordCount + word) * 2u;
+    return uvec2(prefixData[base], prefixData[base + 1u]);
+}
+
+void storeCarry(uint entry, uint word, uint wordCount, uvec2 value)
+{
+    uint base = (entry * wordCount + word) * 2u;
+    carryData[base] = value.x;
+    carryData[base + 1u] = value.y;
+}
+
+void main()
+{
+    uint wordCount = (params.layerCount + 31u) / 32u;
+    uint tilesHigh = (params.outputSize.y + 15u) / 16u;
+    uint binsWide = (params.tilesWide + 15u) / 16u;
+    uint binsHigh = (tilesHigh + 15u) / 16u;
+    uint horizontalJobCount = tilesHigh * wordCount;
+    uint verticalJobCount = params.tilesWide * wordCount;
+    uint job = gl_GlobalInvocationID.x;
+
+    if (job < horizontalJobCount) {
+        uint y = job / wordCount;
+        uint word = job % wordCount;
+        uvec2 carry = uvec2(0u);
+        for (uint binX = 0u; binX < binsWide; ++binX) {
+            uint entry = y * binsWide + binX;
+            storeCarry(entry, word, wordCount, carry);
+            uint edgeX = min((binX + 1u) * 16u, params.tilesWide) - 1u;
+            carry ^= localValue(edgeX, y, word, wordCount);
+        }
+        return;
+    }
+
+    job -= horizontalJobCount;
+    if (job >= verticalJobCount) {
+        return;
+    }
+    uint x = job / wordCount;
+    uint word = job % wordCount;
+    uint binX = x / 16u;
+    uint topSection = binsWide * tilesHigh;
+    uvec2 carry = uvec2(0u);
+    for (uint binY = 0u; binY < binsHigh; ++binY) {
+        uint entry = topSection + binY * params.tilesWide + x;
+        storeCarry(entry, word, wordCount, carry);
+        uint edgeY = min((binY + 1u) * 16u, tilesHigh) - 1u;
+
+        // Local bottom-edge contribution for the current bin column, through
+        // this x coordinate, plus complete northwest bins in this bin row.
+        uvec2 rowContribution = localValue(x, edgeY, word, wordCount);
+        for (uint previousBinX = 0u; previousBinX < binX; ++previousBinX) {
+            uint edgeX = min((previousBinX + 1u) * 16u, params.tilesWide) - 1u;
+            rowContribution ^= localValue(edgeX, edgeY, word, wordCount);
+        }
+        carry ^= rowContribution;
+    }
+}

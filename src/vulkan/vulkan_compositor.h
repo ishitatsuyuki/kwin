@@ -145,10 +145,10 @@ struct KWIN_EXPORT VulkanCompositorRenderResult
 };
 
 /**
- * Tiled compute compositor. A preprocessing pass brute-force tests every layer
- * AABB against 16x16 tiles and emits per-tile layer-index lists. Composition
- * consumes those lists and splits scenes into descriptor batches when more
- * textures are present than fit in one descriptor set.
+ * Tiled compute compositor. Three preprocessing passes use a hierarchical 2D
+ * prefix scan over rectangle-corner XOR events to emit per-tile layer masks.
+ * Composition consumes those masks and splits scenes into descriptor batches
+ * when more textures are present than fit in one descriptor set.
  */
 class KWIN_EXPORT VulkanCompositor : public QObject
 {
@@ -204,6 +204,10 @@ private:
         vk::raii::DeviceMemory hotLayerMemory;
         vk::raii::Buffer tileBuffer;
         vk::raii::DeviceMemory tileMemory;
+        vk::raii::Buffer prefixBuffer;
+        vk::raii::DeviceMemory prefixMemory;
+        vk::raii::Buffer carryBuffer;
+        vk::raii::DeviceMemory carryMemory;
         vk::raii::Buffer dirtyTileBuffer;
         vk::raii::DeviceMemory dirtyTileMemory;
         vk::raii::Buffer outputLutBuffer;
@@ -249,6 +253,8 @@ private:
     vk::raii::DescriptorSetLayout m_descriptorSetLayout;
     vk::raii::PipelineLayout m_pipelineLayout;
     vk::raii::Pipeline m_preprocessPipeline;
+    vk::raii::Pipeline m_prefixPropagatePipeline;
+    vk::raii::Pipeline m_prefixFinalizePipeline;
     vk::raii::Pipeline m_compositePipeline;
     vk::raii::Pipeline m_colorCompositePipeline;
     vk::raii::Pipeline m_simpleCompositePipeline;

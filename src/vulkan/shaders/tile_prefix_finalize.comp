@@ -1,0 +1,90 @@
+#version 450
+
+// Add row/column carries to each local prefix and emit the final layer masks.
+// One invocation owns one tile and scans its words from the topmost layer down
+// so opaque coverage can conservatively discard all lower layers.
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 1) writeonly buffer TileBuffer
+{
+    uint tileData[];
+};
+
+layout(std430, set = 0, binding = 7) readonly buffer PrefixBuffer
+{
+    uint prefixData[];
+};
+
+layout(std430, set = 0, binding = 8) readonly buffer CarryBuffer
+{
+    uint carryData[];
+};
+
+layout(push_constant) uniform Parameters
+{
+    uint layerCount;
+    uint tilesWide;
+    uint flags;
+    uint dirtyTileCount;
+    vec4 background;
+    uint firstLayer;
+    uint lastLayer;
+    uvec2 outputSize;
+    vec4 outputLutParameters;
+} params;
+
+uvec2 loadPrefix(uint entry)
+{
+    return uvec2(prefixData[entry * 2u], prefixData[entry * 2u + 1u]);
+}
+
+uvec2 loadCarry(uint entry)
+{
+    return uvec2(carryData[entry * 2u], carryData[entry * 2u + 1u]);
+}
+
+uvec2 globalValue(uint tileIndex, uint tileX, uint tileY, uint word, uint wordCount,
+                  uint binsWide, uint tilesHigh)
+{
+    uint localEntry = tileIndex * wordCount + word;
+    uint binX = tileX / 16u;
+    uint binY = tileY / 16u;
+    uint leftEntry = (tileY * binsWide + binX) * wordCount + word;
+    uint topSection = binsWide * tilesHigh;
+    uint topEntry = (topSection + binY * params.tilesWide + tileX) * wordCount + word;
+    return loadPrefix(localEntry) ^ loadCarry(leftEntry) ^ loadCarry(topEntry);
+}
+
+void main()
+{
+    uint tileX = gl_GlobalInvocationID.x;
+    uint tileY = gl_GlobalInvocationID.y;
+    uint tilesHigh = (params.outputSize.y + 15u) / 16u;
+    if (tileX >= params.tilesWide || tileY >= tilesHigh) {
+        return;
+    }
+    uint wordCount = (params.layerCount + 31u) / 32u;
+    uint binsWide = (params.tilesWide + 15u) / 16u;
+    uint tileIndex = tileY * params.tilesWide + tileX;
+
+    int opaqueWord = -1;
+    uint opaqueBit = 0u;
+    for (int word = int(wordCount) - 1; word >= 0; --word) {
+        uint opaque = globalValue(tileIndex, tileX, tileY, uint(word), wordCount, binsWide, tilesHigh).y;
+        if (opaque != 0u) {
+            opaqueWord = word;
+            opaqueBit = uint(findMSB(opaque));
+            break;
+        }
+    }
+
+    for (uint word = 0u; word < wordCount; ++word) {
+        uint present = globalValue(tileIndex, tileX, tileY, word, wordCount, binsWide, tilesHigh).x;
+        if (int(word) < opaqueWord) {
+            present = 0u;
+        } else if (int(word) == opaqueWord && opaqueBit != 0u) {
+            present &= ~((1u << opaqueBit) - 1u);
+        }
+        tileData[tileIndex * wordCount + word] = present;
+    }
+}

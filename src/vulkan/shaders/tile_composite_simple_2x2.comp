@@ -97,8 +97,9 @@ void main()
         return;
     }
 
-    uint listBase = tileIndex * (params.layerCount + 1u);
-    uint tileLayerCount = tileData[listBase];
+    uint wordCount = (params.layerCount + 31u) / 32u;
+    uint firstWord = params.firstLayer / 32u;
+    uint lastWord = (params.lastLayer + 31u) / 32u;
     vec4 background[4];
     vec4 result[4];
     for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
@@ -109,21 +110,30 @@ void main()
             : vec4(0.0);
         result[pixelIndex] = background[pixelIndex];
     }
-    for (uint i = 0u; i < tileLayerCount; ++i) {
-        uint layerIndex = tileData[listBase + 1u + i];
-        if (layerIndex < params.firstLayer || layerIndex >= params.lastLayer) {
-            continue;
+    for (uint word = firstWord; word < lastWord; ++word) {
+        uint mask = tileData[tileIndex * wordCount + word];
+        if (word == firstWord) {
+            mask &= ~0u << (params.firstLayer & 31u);
         }
-        HotLayer layer = layers[layerIndex];
-        for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
-            if (!valid[pixelIndex]) {
-                continue;
+        uint lastBit = params.lastLayer & 31u;
+        if (word + 1u == lastWord && lastBit != 0u) {
+            mask &= (1u << lastBit) - 1u;
+        }
+        while (mask != 0u) {
+            uint bit = uint(findLSB(mask));
+            mask &= mask - 1u;
+            uint layerIndex = word * 32u + bit;
+            HotLayer layer = layers[layerIndex];
+            for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
+                if (!valid[pixelIndex]) {
+                    continue;
+                }
+                vec4 source;
+                if (!evaluateLayer(layer, vec2(pixels[pixelIndex]) + vec2(0.5), source)) {
+                    continue;
+                }
+                result[pixelIndex] = source + result[pixelIndex] * (1.0 - source.a);
             }
-            vec4 source;
-            if (!evaluateLayer(layer, vec2(pixels[pixelIndex]) + vec2(0.5), source)) {
-                continue;
-            }
-            result[pixelIndex] = source + result[pixelIndex] * (1.0 - source.a);
         }
     }
     for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {

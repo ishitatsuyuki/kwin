@@ -121,7 +121,7 @@ float fractionalVertex(const QPointF &position)
 bool validateShaderInterface(const QShader &shader, const QString &path)
 {
     const QShaderDescription description = shader.description();
-    std::array<bool, 7> bindings{};
+    std::array<bool, 9> bindings{};
     const auto recordBinding = [&path, &bindings](int descriptorSet, int binding, std::initializer_list<int> allowed) {
         if (descriptorSet != 0 || std::ranges::find(allowed, binding) == allowed.end()
             || binding < 0 || size_t(binding) >= bindings.size() || bindings[binding]) {
@@ -133,7 +133,7 @@ bool validateShaderInterface(const QShader &shader, const QString &path)
     };
 
     for (const QShaderDescription::StorageBlock &block : description.storageBlocks()) {
-        if (!recordBinding(block.descriptorSet, block.binding, {0, 1, 4, 5, 6})) {
+        if (!recordBinding(block.descriptorSet, block.binding, {0, 1, 4, 5, 6, 7, 8})) {
             return false;
         }
     }
@@ -157,13 +157,19 @@ bool validateShaderInterface(const QShader &shader, const QString &path)
     const bool simpleCompositeShader = path.contains(QStringLiteral("tile_composite_simple"));
     const bool colorCompositeShader = path.contains(QStringLiteral("tile_composite_color"));
     const bool compositeShader = path.contains(QStringLiteral("tile_composite"));
+    const bool prefixPropagateShader = path.contains(QStringLiteral("tile_prefix_propagate"));
+    const bool prefixFinalizeShader = path.contains(QStringLiteral("tile_prefix_finalize"));
     const std::array expectedBindings = simpleCompositeShader
-        ? std::array{false, true, true, true, true, false, true}
+        ? std::array{false, true, true, true, true, false, true, false, false}
         : colorCompositeShader
-        ? std::array{true, true, true, true, true, false, false}
+        ? std::array{true, true, true, true, true, false, false, false, false}
         : compositeShader
-        ? std::array{true, true, true, true, true, true, false}
-        : std::array{false, true, false, false, true, false, true};
+        ? std::array{true, true, true, true, true, true, false, false, false}
+        : prefixPropagateShader
+        ? std::array{false, false, false, false, false, false, false, true, true}
+        : prefixFinalizeShader
+        ? std::array{false, true, false, false, false, false, false, true, true}
+        : std::array{false, false, false, false, false, false, true, true, false};
     if (bindings != expectedBindings) {
         qCWarning(KWIN_VULKAN) << "Vulkan compositor shader descriptor interface is incomplete" << path;
         return false;
@@ -283,6 +289,10 @@ VulkanCompositor::FrameResources::FrameResources()
     , hotLayerMemory(nullptr)
     , tileBuffer(nullptr)
     , tileMemory(nullptr)
+    , prefixBuffer(nullptr)
+    , prefixMemory(nullptr)
+    , carryBuffer(nullptr)
+    , carryMemory(nullptr)
     , dirtyTileBuffer(nullptr)
     , dirtyTileMemory(nullptr)
     , outputLutBuffer(nullptr)
@@ -298,6 +308,8 @@ VulkanCompositor::VulkanCompositor(VulkanDevice *device)
     , m_descriptorSetLayout(nullptr)
     , m_pipelineLayout(nullptr)
     , m_preprocessPipeline(nullptr)
+    , m_prefixPropagatePipeline(nullptr)
+    , m_prefixFinalizePipeline(nullptr)
     , m_compositePipeline(nullptr)
     , m_colorCompositePipeline(nullptr)
     , m_simpleCompositePipeline(nullptr)
@@ -342,6 +354,8 @@ bool VulkanCompositor::initialize()
         {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
         {5, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
         {6, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
+        {7, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
+        {8, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
     };
     auto [layoutResult, descriptorSetLayout] = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{
         vk::DescriptorSetLayoutCreateFlags{},
@@ -407,11 +421,14 @@ bool VulkanCompositor::initialize()
 bool VulkanCompositor::createPipelines()
 {
     const auto preprocessModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_preprocess.comp.qsb"));
+    const auto prefixPropagateModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_prefix_propagate.comp.qsb"));
+    const auto prefixFinalizeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_prefix_finalize.comp.qsb"));
     const auto compositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite.comp.qsb"));
     const auto colorCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_color.comp.qsb"));
     const auto simpleCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_simple.comp.qsb"));
     const auto shallowCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_simple_2x2.comp.qsb"));
-    if (!preprocessModule || !compositeModule || !colorCompositeModule || !simpleCompositeModule || !shallowCompositeModule) {
+    if (!preprocessModule || !prefixPropagateModule || !prefixFinalizeModule
+        || !compositeModule || !colorCompositeModule || !simpleCompositeModule || !shallowCompositeModule) {
         return false;
     }
 
@@ -435,14 +452,19 @@ bool VulkanCompositor::createPipelines()
     };
 
     auto preprocessPipeline = createPipeline(*preprocessModule);
+    auto prefixPropagatePipeline = createPipeline(*prefixPropagateModule);
+    auto prefixFinalizePipeline = createPipeline(*prefixFinalizeModule);
     auto compositePipeline = createPipeline(*compositeModule);
     auto colorCompositePipeline = createPipeline(*colorCompositeModule);
     auto simpleCompositePipeline = createPipeline(*simpleCompositeModule);
     auto shallowCompositePipeline = createPipeline(*shallowCompositeModule);
-    if (!preprocessPipeline || !compositePipeline || !colorCompositePipeline || !simpleCompositePipeline || !shallowCompositePipeline) {
+    if (!preprocessPipeline || !prefixPropagatePipeline || !prefixFinalizePipeline
+        || !compositePipeline || !colorCompositePipeline || !simpleCompositePipeline || !shallowCompositePipeline) {
         return false;
     }
     m_preprocessPipeline = std::move(*preprocessPipeline);
+    m_prefixPropagatePipeline = std::move(*prefixPropagatePipeline);
+    m_prefixFinalizePipeline = std::move(*prefixFinalizePipeline);
     m_compositePipeline = std::move(*compositePipeline);
     m_colorCompositePipeline = std::move(*colorCompositePipeline);
     m_simpleCompositePipeline = std::move(*simpleCompositePipeline);
@@ -503,7 +525,8 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
 {
     if (size == m_size && layerCount <= m_layerCapacity
         && *m_frames[0].layerBuffer && *m_frames[0].hotLayerBuffer
-        && *m_frames[0].tileBuffer && *m_frames[0].dirtyTileBuffer) {
+        && *m_frames[0].tileBuffer && *m_frames[0].prefixBuffer
+        && *m_frames[0].carryBuffer && *m_frames[0].dirtyTileBuffer) {
         return true;
     }
     if (size.isEmpty() || layerCount > std::numeric_limits<uint32_t>::max()) {
@@ -522,6 +545,10 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
         frame.hotLayerMemory.clear();
         frame.tileBuffer.clear();
         frame.tileMemory.clear();
+        frame.prefixBuffer.clear();
+        frame.prefixMemory.clear();
+        frame.carryBuffer.clear();
+        frame.carryMemory.clear();
         frame.dirtyTileBuffer.clear();
         frame.dirtyTileMemory.clear();
         frame.outputLutBuffer.clear();
@@ -532,6 +559,9 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
 
     const uint32_t tilesWide = (size.width() + TileSize - 1) / TileSize;
     const uint32_t tilesHigh = (size.height() + TileSize - 1) / TileSize;
+    const uint32_t binsWide = (tilesWide + TileSize - 1) / TileSize;
+    const uint32_t binsHigh = (tilesHigh + TileSize - 1) / TileSize;
+    const size_t maskWordCapacity = (layerCapacity + 31) / 32;
     if (tilesWide > 0x10000u || tilesHigh > 0x10000u) {
         return false;
     }
@@ -547,7 +577,17 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
     };
     const vk::BufferCreateInfo tileBufferInfo{
         vk::BufferCreateFlags{},
-        vk::DeviceSize(tilesWide) * tilesHigh * (layerCapacity + 1) * sizeof(uint32_t),
+        vk::DeviceSize(tilesWide) * tilesHigh * maskWordCapacity * sizeof(uint32_t),
+        vk::BufferUsageFlagBits::eStorageBuffer,
+    };
+    const vk::BufferCreateInfo prefixBufferInfo{
+        vk::BufferCreateFlags{},
+        vk::DeviceSize(tilesWide) * tilesHigh * maskWordCapacity * 2 * sizeof(uint32_t),
+        vk::BufferUsageFlagBits::eStorageBuffer,
+    };
+    const vk::BufferCreateInfo carryBufferInfo{
+        vk::BufferCreateFlags{},
+        vk::DeviceSize(size_t(binsWide) * tilesHigh + size_t(tilesWide) * binsHigh) * maskWordCapacity * 2 * sizeof(uint32_t),
         vk::BufferUsageFlagBits::eStorageBuffer,
     };
     const vk::BufferCreateInfo dirtyTileBufferInfo{
@@ -616,6 +656,32 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
             return false;
         }
 
+        frame.prefixMemory = m_device->allocateMemory(prefixBufferInfo, vk::MemoryPropertyFlagBits::eDeviceLocal);
+        if (!*frame.prefixMemory) {
+            return false;
+        }
+        auto [prefixBufferResult, prefixBuffer] = m_device->logicalDevice().createBuffer(prefixBufferInfo);
+        if (prefixBufferResult != vk::Result::eSuccess) {
+            return false;
+        }
+        frame.prefixBuffer = std::move(prefixBuffer);
+        if (frame.prefixBuffer.bindMemory(frame.prefixMemory, 0) != vk::Result::eSuccess) {
+            return false;
+        }
+
+        frame.carryMemory = m_device->allocateMemory(carryBufferInfo, vk::MemoryPropertyFlagBits::eDeviceLocal);
+        if (!*frame.carryMemory) {
+            return false;
+        }
+        auto [carryBufferResult, carryBuffer] = m_device->logicalDevice().createBuffer(carryBufferInfo);
+        if (carryBufferResult != vk::Result::eSuccess) {
+            return false;
+        }
+        frame.carryBuffer = std::move(carryBuffer);
+        if (frame.carryBuffer.bindMemory(frame.carryMemory, 0) != vk::Result::eSuccess) {
+            return false;
+        }
+
         frame.dirtyTileMemory = m_device->allocateMemory(dirtyTileBufferInfo, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
         if (!*frame.dirtyTileMemory) {
             return false;
@@ -661,7 +727,7 @@ bool VulkanCompositor::ensureDescriptorSets(uint32_t batchCount)
     m_currentFrame->descriptorSets.clear();
     m_currentFrame->descriptorPool.clear();
     const std::array poolSizes{
-        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 5 * capacity},
+        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 7 * capacity},
         vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, capacity},
         vk::DescriptorPoolSize{vk::DescriptorType::eCombinedImageSampler, MaximumTextureCount * capacity},
     };
@@ -696,6 +762,8 @@ bool VulkanCompositor::updateBufferDescriptors(uint32_t batchCount)
     const vk::DescriptorBufferInfo layerInfo{*m_currentFrame->layerBuffer, 0, vk::WholeSize};
     const vk::DescriptorBufferInfo hotLayerInfo{*m_currentFrame->hotLayerBuffer, 0, vk::WholeSize};
     const vk::DescriptorBufferInfo tileInfo{*m_currentFrame->tileBuffer, 0, vk::WholeSize};
+    const vk::DescriptorBufferInfo prefixInfo{*m_currentFrame->prefixBuffer, 0, vk::WholeSize};
+    const vk::DescriptorBufferInfo carryInfo{*m_currentFrame->carryBuffer, 0, vk::WholeSize};
     const vk::DescriptorBufferInfo dirtyTileInfo{*m_currentFrame->dirtyTileBuffer, 0, vk::WholeSize};
     const vk::DescriptorBufferInfo outputLutInfo{*m_currentFrame->outputLutBuffer, 0, vk::WholeSize};
     for (uint32_t i = 0; i < batchCount; ++i) {
@@ -705,6 +773,8 @@ bool VulkanCompositor::updateBufferDescriptors(uint32_t batchCount)
             vk::WriteDescriptorSet{*m_currentFrame->descriptorSets[i], 4, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &dirtyTileInfo},
             vk::WriteDescriptorSet{*m_currentFrame->descriptorSets[i], 5, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &outputLutInfo},
             vk::WriteDescriptorSet{*m_currentFrame->descriptorSets[i], 6, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &hotLayerInfo},
+            vk::WriteDescriptorSet{*m_currentFrame->descriptorSets[i], 7, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &prefixInfo},
+            vk::WriteDescriptorSet{*m_currentFrame->descriptorSets[i], 8, 0, 1, vk::DescriptorType::eStorageBuffer, nullptr, &carryInfo},
         };
         m_device->logicalDevice().updateDescriptorSets(writes, {});
     }
@@ -1332,6 +1402,9 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
 
     const uint32_t tilesWide = (size.width() + TileSize - 1) / TileSize;
     const uint32_t tilesHigh = (size.height() + TileSize - 1) / TileSize;
+    const uint32_t binsWide = (tilesWide + TileSize - 1) / TileSize;
+    const uint32_t binsHigh = (tilesHigh + TileSize - 1) / TileSize;
+    const uint32_t maskWordCount = (uint32_t(layers.size()) + 31) / 32;
     const Region effectiveDamage = forceFullDamage
         ? Region(0, 0, size.width(), size.height())
         : damage.intersected(Rect(0, 0, size.width(), size.height()));
@@ -1435,8 +1508,39 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
     commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_preprocessPipeline);
     commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, m_pipelineLayout, 0, *m_currentFrame->descriptorSets.front(), {});
     commandBuffer.pushConstants(m_pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushConstants), &pushConstants);
-    if (!dirtyTiles.empty()) {
-        commandBuffer.dispatch((dirtyTiles.size() + 63) / 64, 1, 1);
+    if (!dirtyTiles.empty() && maskWordCount != 0) {
+        commandBuffer.dispatch(binsWide, binsHigh, maskWordCount);
+        const vk::BufferMemoryBarrier2 prefixBarrier{
+            vk::PipelineStageFlagBits2::eComputeShader,
+            vk::AccessFlagBits2::eShaderWrite,
+            vk::PipelineStageFlagBits2::eComputeShader,
+            vk::AccessFlagBits2::eShaderRead,
+            vk::QueueFamilyIgnored,
+            vk::QueueFamilyIgnored,
+            *m_currentFrame->prefixBuffer,
+            0,
+            vk::WholeSize,
+        };
+        commandBuffer.pipelineBarrier2(vk::DependencyInfo{{}, {}, prefixBarrier, {}});
+
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_prefixPropagatePipeline);
+        const uint32_t propagateJobCount = maskWordCount * (tilesWide + tilesHigh);
+        commandBuffer.dispatch((propagateJobCount + 63) / 64, 1, 1);
+        const vk::BufferMemoryBarrier2 carryBarrier{
+            vk::PipelineStageFlagBits2::eComputeShader,
+            vk::AccessFlagBits2::eShaderWrite,
+            vk::PipelineStageFlagBits2::eComputeShader,
+            vk::AccessFlagBits2::eShaderRead,
+            vk::QueueFamilyIgnored,
+            vk::QueueFamilyIgnored,
+            *m_currentFrame->carryBuffer,
+            0,
+            vk::WholeSize,
+        };
+        commandBuffer.pipelineBarrier2(vk::DependencyInfo{{}, {}, carryBarrier, {}});
+
+        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, m_prefixFinalizePipeline);
+        commandBuffer.dispatch(binsWide, binsHigh, 1);
     }
     const vk::BufferMemoryBarrier2 tileBarrier{
         vk::PipelineStageFlagBits2::eComputeShader,
@@ -1569,6 +1673,10 @@ void VulkanCompositor::releaseResources()
         frame.targetImageView.clear();
         frame.tileBuffer.clear();
         frame.tileMemory.clear();
+        frame.prefixBuffer.clear();
+        frame.prefixMemory.clear();
+        frame.carryBuffer.clear();
+        frame.carryMemory.clear();
         frame.dirtyTileBuffer.clear();
         frame.dirtyTileMemory.clear();
         frame.outputLutBuffer.clear();
@@ -1587,6 +1695,8 @@ void VulkanCompositor::releaseResources()
     m_texture.reset();
     m_sampler.clear();
     m_preprocessPipeline.clear();
+    m_prefixPropagatePipeline.clear();
+    m_prefixFinalizePipeline.clear();
     m_compositePipeline.clear();
     m_colorCompositePipeline.clear();
     m_simpleCompositePipeline.clear();

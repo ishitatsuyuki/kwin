@@ -268,23 +268,33 @@ void main()
         return;
     }
 
-    uint listBase = tileIndex * (params.layerCount + 1u);
-    uint tileLayerCount = tileData[listBase];
+    uint wordCount = (params.layerCount + 31u) / 32u;
+    uint firstWord = params.firstLayer / 32u;
+    uint lastWord = (params.lastLayer + 31u) / 32u;
     vec2 samplePosition = vec2(pixel) + vec2(0.5);
     vec4 background = (params.flags & (1u << 1)) != 0u
         ? imageLoad(destination, pixel)
         : params.background;
     vec4 result = background;
-    for (uint i = 0u; i < tileLayerCount; ++i) {
-        uint layerIndex = tileData[listBase + 1u + i];
-        if (layerIndex < params.firstLayer || layerIndex >= params.lastLayer) {
-            continue;
+    for (uint word = firstWord; word < lastWord; ++word) {
+        uint mask = tileData[tileIndex * wordCount + word];
+        if (word == firstWord) {
+            mask &= ~0u << (params.firstLayer & 31u);
         }
-        vec4 source;
-        if (!evaluateLayer(layers[layerIndex], samplePosition, source)) {
-            continue;
+        uint lastBit = params.lastLayer & 31u;
+        if (word + 1u == lastWord && lastBit != 0u) {
+            mask &= (1u << lastBit) - 1u;
         }
-        result = source + result * (1.0 - source.a);
+        while (mask != 0u) {
+            uint bit = uint(findLSB(mask));
+            mask &= mask - 1u;
+            uint layerIndex = word * 32u + bit;
+            vec4 source;
+            if (!evaluateLayer(layers[layerIndex], samplePosition, source)) {
+                continue;
+            }
+            result = source + result * (1.0 - source.a);
+        }
     }
     imageStore(destination, pixel, result);
 }

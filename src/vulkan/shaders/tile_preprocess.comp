@@ -1,10 +1,10 @@
 #version 450
 
-// One invocation owns one Pathfinder-style 16x16 tile. The initial
-// implementation deliberately tests every layer AABB and stores a per-tile
-// list of intersecting layer indices. Later implementations can replace this
-// pass with hierarchical binning without changing the composition pass.
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+// The binning monoid is a pair of 32-layer masks under XOR. A rectangle
+// toggles its layer bit at four corners of a 2D difference grid; an inclusive
+// 2D XOR scan reconstructs exact tile membership. The second mask tracks tiles
+// that are fully covered by guaranteed-opaque layers.
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 struct HotLayer
 {
@@ -22,14 +22,10 @@ layout(std430, set = 0, binding = 6) readonly buffer HotLayerBuffer
     HotLayer layers[];
 };
 
-layout(std430, set = 0, binding = 1) writeonly buffer TileBuffer
+// Two uints (present, opaque) for every tile and mask word.
+layout(std430, set = 0, binding = 7) writeonly buffer PrefixBuffer
 {
-    uint tileData[];
-};
-
-layout(std430, set = 0, binding = 4) readonly buffer DirtyTileBuffer
-{
-    uint dirtyTiles[];
+    uint prefixData[];
 };
 
 layout(push_constant) uniform Parameters
@@ -45,35 +41,93 @@ layout(push_constant) uniform Parameters
     vec4 outputLutParameters;
 } params;
 
-void main()
-{
-    uint dirtyTileIndex = gl_GlobalInvocationID.x;
-    if (dirtyTileIndex >= params.dirtyTileCount) {
-        return;
-    }
-    uint packedTile = dirtyTiles[dirtyTileIndex];
-    uint tileX = packedTile & 0xffffu;
-    uint tileY = packedTile >> 16;
-    uint tileIndex = tileY * params.tilesWide + tileX;
-    vec2 tileMin = vec2(tileX, tileY) * 16.0;
-    vec2 tileMax = min(tileMin + vec2(16.0), vec2(params.outputSize));
-    uint listBase = tileIndex * (params.layerCount + 1u);
-    uint count = 0u;
+shared uint localPresent[256];
+shared uint localOpaque[256];
 
-    for (uint i = 0; i < params.layerCount; ++i) {
-        vec4 rect = layers[i].rect;
-        bool intersects = rect.x < tileMax.x && rect.z > tileMin.x
-            && rect.y < tileMax.y && rect.w > tileMin.y;
-        if (intersects) {
-            bool fullyCovers = (layers[i].metadata.z & (1u << 13)) != 0u
-                && rect.x <= tileMin.x && rect.z >= tileMax.x
-                && rect.y <= tileMin.y && rect.w >= tileMax.y;
-            if (fullyCovers) {
-                count = 0u;
-            }
-            tileData[listBase + 1u + count] = i;
-            ++count;
+void toggleCorner(ivec2 corner, ivec2 binOrigin, uint bit, bool opaque)
+{
+    ivec2 local = corner - binOrigin;
+    if (all(greaterThanEqual(local, ivec2(0))) && all(lessThan(local, ivec2(16)))) {
+        uint index = uint(local.y * 16 + local.x);
+        if (opaque) {
+            atomicXor(localOpaque[index], bit);
+        } else {
+            atomicXor(localPresent[index], bit);
         }
     }
-    tileData[listBase] = count;
+}
+
+void toggleRectangle(ivec4 tiles, ivec2 binOrigin, uint bit, bool opaque)
+{
+    if (tiles.x >= tiles.z || tiles.y >= tiles.w) {
+        return;
+    }
+    toggleCorner(tiles.xy, binOrigin, bit, opaque);
+    toggleCorner(ivec2(tiles.z, tiles.y), binOrigin, bit, opaque);
+    toggleCorner(ivec2(tiles.x, tiles.w), binOrigin, bit, opaque);
+    toggleCorner(tiles.zw, binOrigin, bit, opaque);
+}
+
+void main()
+{
+    uint localIndex = gl_LocalInvocationIndex;
+    localPresent[localIndex] = 0u;
+    localOpaque[localIndex] = 0u;
+    barrier();
+
+    uint maskWord = gl_WorkGroupID.z;
+    uint layerIndex = maskWord * 32u + localIndex;
+    ivec2 tilesSize = ivec2(int(params.tilesWide), int((params.outputSize.y + 15u) / 16u));
+    ivec2 binOrigin = ivec2(gl_WorkGroupID.xy) * 16;
+    if (localIndex < 32u && layerIndex < params.layerCount) {
+        HotLayer layer = layers[layerIndex];
+        ivec4 presentTiles = ivec4(floor(layer.rect.xy / 16.0), ceil(layer.rect.zw / 16.0));
+        presentTiles.xy = clamp(presentTiles.xy, ivec2(0), tilesSize);
+        presentTiles.zw = clamp(presentTiles.zw, ivec2(0), tilesSize);
+        uint bit = 1u << (layerIndex & 31u);
+        toggleRectangle(presentTiles, binOrigin, bit, false);
+
+        if ((layer.metadata.z & (1u << 13)) != 0u) {
+            ivec4 opaqueTiles = ivec4(ceil(layer.rect.xy / 16.0), floor(layer.rect.zw / 16.0));
+            // The final output tile may be smaller than 16x16.
+            if ((params.outputSize.x & 15u) != 0u && layer.rect.z >= float(params.outputSize.x)) {
+                opaqueTiles.z = tilesSize.x;
+            }
+            if ((params.outputSize.y & 15u) != 0u && layer.rect.w >= float(params.outputSize.y)) {
+                opaqueTiles.w = tilesSize.y;
+            }
+            opaqueTiles.xy = clamp(opaqueTiles.xy, ivec2(0), tilesSize);
+            opaqueTiles.zw = clamp(opaqueTiles.zw, ivec2(0), tilesSize);
+            toggleRectangle(opaqueTiles, binOrigin, bit, true);
+        }
+    }
+    barrier();
+
+    uint x = gl_LocalInvocationID.x;
+    uint y = gl_LocalInvocationID.y;
+    for (uint offset = 1u; offset < 16u; offset <<= 1u) {
+        uint present = x >= offset ? localPresent[localIndex - offset] : 0u;
+        uint opaque = x >= offset ? localOpaque[localIndex - offset] : 0u;
+        barrier();
+        localPresent[localIndex] ^= present;
+        localOpaque[localIndex] ^= opaque;
+        barrier();
+    }
+    for (uint offset = 1u; offset < 16u; offset <<= 1u) {
+        uint present = y >= offset ? localPresent[localIndex - offset * 16u] : 0u;
+        uint opaque = y >= offset ? localOpaque[localIndex - offset * 16u] : 0u;
+        barrier();
+        localPresent[localIndex] ^= present;
+        localOpaque[localIndex] ^= opaque;
+        barrier();
+    }
+
+    ivec2 tile = binOrigin + ivec2(gl_LocalInvocationID.xy);
+    if (all(lessThan(tile, tilesSize))) {
+        uint maskWordCount = (params.layerCount + 31u) / 32u;
+        uint tileIndex = uint(tile.y) * params.tilesWide + uint(tile.x);
+        uint base = (tileIndex * maskWordCount + maskWord) * 2u;
+        prefixData[base] = localPresent[localIndex];
+        prefixData[base + 1u] = localOpaque[localIndex];
+    }
 }
