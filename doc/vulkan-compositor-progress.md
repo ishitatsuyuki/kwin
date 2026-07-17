@@ -94,7 +94,7 @@ test unless the item explicitly says otherwise.
 - [x] Overdraw-heavy GPU-time comparison with the OpenGL backend (translucent worst case remains slower on Navi 10; opaque front-to-back termination is substantially faster before scene occlusion)
 - [x] Async-compute latency benchmark under graphics contention, with a forced-graphics-queue comparison mode
 
-### Async-compute contention result
+### Pre-optimization baseline (2026-07-17)
 
 `vulkanCompositorBenchmark::benchmarkComputeLatencyUnderGraphicsContention`
 queues OpenGL raster overdraw without cross-API synchronization, then measures
@@ -104,20 +104,53 @@ delay is not mistaken for shader execution time. Set
 `KWIN_VULKAN_FORCE_GRAPHICS_QUEUE=1` to select the graphics family before device,
 command-pool, and compositor resource creation.
 
-On the Radeon RX 5700 XT (RADV NAVI10), the second 20-sample run measured:
+The baseline is commit `fe5d243a82` in a Debug build on an AMD Radeon RX 5700
+XT (RADV NAVI10), Mesa 26.1.4, Linux 7.1.3, and Qt 6.11.1. The dedicated
+compute queue is family 1; the forced graphics queue is family 0. Global queue
+priority was unavailable, so both runs report `highPriority=false`. The amdgpu
+performance setting was `profile_standard`; the active DPM states before and
+after the runs were 1300 MHz GFX and 875 MHz memory. No Vulkan validation layer
+was enabled for performance measurement.
 
-| Queued raster layers | Compute-only median / p95 | Graphics median / p95 |
-| --- | --- | --- |
-| 0 | 0.949 / 1.010 ms | 0.937 / 1.006 ms |
-| 16 | 0.884 / 0.940 ms | 0.959 / 0.997 ms |
-| 64 | 1.569 / 1.629 ms | 1.793 / 1.819 ms |
+Both queue modes used the same command, with the environment override added for
+the graphics-queue control:
 
-The idle difference is noise-sized. Under the heavier contention case, the
-compute-only queue reduced median completion latency by 12.5% and p95 by 10.4%.
-Its shader execution itself became slower under shared GPU pressure (1.294 ms
-versus 0.573 ms in the graphics-queue timestamp), but avoided enough queueing
-delay to finish sooner overall. The diagnostic graphics-queue path passes the
-full `testVulkan` suite with Vulkan validation enabled.
+```sh
+build/bin/vulkanCompositorBenchmark -median 5 -minimumtotal 500
+KWIN_VULKAN_FORCE_GRAPHICS_QUEUE=1 build/bin/vulkanCompositorBenchmark -median 5 -minimumtotal 500
+```
+
+The isolated results below report Qt's median synchronized wall time and the
+median of the benchmark's GPU timestamp samples. GPU time includes AABB
+preprocessing and tile composition; the two stages are also shown separately.
+
+| 1920x1080 scene | Compute wall | Compute GPU (preprocess + composite) | Forced-gfx GPU | OpenGL wall | OpenGL GPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 translucent layer | 0.51 ms | 0.210 ms (0.005 + 0.205) | 0.199 ms | 0.087 ms | 0.030 ms |
+| 16 translucent layers | 1.59 ms | 1.254 ms (0.024 + 1.229) | 1.254 ms | 0.53 ms | 0.436 ms |
+| 64 translucent layers | 5.50 ms | 5.099 ms (0.090 + 5.009) | 5.103 ms | 1.90 ms | 1.732 ms |
+| 64 opaque layers | 0.65 ms | 0.304 ms (0.090 + 0.214) | 0.292 ms | 1.90 ms | 1.730 ms |
+
+The translucent worst case is about 2.9x slower than OpenGL in isolated GPU
+time. With opaque front-to-back termination, Vulkan is about 5.7x faster than
+the unoccluded OpenGL draw loop. Selecting the graphics queue has little effect
+on isolated shader time.
+
+The contention benchmark takes 20 samples per test invocation. The table uses
+Qt's median of five invocations after its warm-up; p95 and GPU execution are the
+medians of the corresponding five reported values.
+
+| Queued raster layers | Compute-only median / p95 / GPU | Graphics median / p95 / GPU | Compute latency reduction (median / p95) |
+| --- | ---: | ---: | ---: |
+| 0 | 1.540 / 1.560 / 1.254 ms | 1.543 / 1.562 / 1.249 ms | 0.2% / 0.1% |
+| 16 | 1.701 / 1.725 / 1.399 ms | 1.801 / 1.822 / 1.249 ms | 5.6% / 5.3% |
+| 64 | 2.606 / 2.644 / 2.311 ms | 3.122 / 3.143 / 1.249 ms | 16.5% / 15.9% |
+
+The idle difference is noise-sized. Under the heavier contention case, compute
+shader execution itself becomes slower because it shares GPU resources with the
+raster workload, but independent scheduling avoids enough graphics-queue delay
+to finish 16.5% sooner. Both complete benchmark runs passed 13 tests with no
+current-boot kernel GPU-reset, timeout, fault, or device-loss report.
 
 ## Planned optimization passes
 
