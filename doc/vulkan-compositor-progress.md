@@ -55,6 +55,7 @@ test unless the item explicitly says otherwise.
 - [x] Direct scanout and overlay-plane interaction (compiled; physical KMS run still needed)
 - [x] Multi-GPU presentation through the existing fenced GPU-copy swapchain (compiled; multi-GPU run still needed)
 - [x] Source buffer release points and output completion fences
+- [x] Tile-aligned Vulkan repaint expansion before scene occlusion/layer collection (partial-damage move regression plus fractional-scale and all-output-transform coverage)
 - [x] Wayland explicit host synchronization protocol (`linux-drm-syncobj-v1` acquire fences and per-commit release timelines for output and hardware-cursor dma-bufs; live host protocol trace under Vulkan validation)
 - [x] Screenshot and screencast paths (output, region, and window capture; PipeWire memfd and directly rendered dma-buf buffers with syncobj fences)
 - [x] Embedded and metadata cursor capture paths
@@ -84,7 +85,7 @@ test unless the item explicitly says otherwise.
 - [x] Differential textured item-tree scenes against the OpenGL renderer
 - [x] Edge sizes (non-multiples of 16), empty scenes, and scenes beyond 64 layers
 - [x] Descriptor-batched scenes beyond 16 unique textures, including destination-out across batches
-- [x] Transforms, fractional scaling, clipping, and damage-only scenes
+- [x] Transforms, fractional scaling, clipping, damage-only scenes, and preservation of scene contents around partial-damage tile margins
 - [x] GPU-vs-CPU transfer-function, gamut-conversion, and HDR tone-mapping scenes
 - [x] ICC and output-calibration scene corpus (BToA, shaper-matrix, and MHC2 profiles)
 - [x] Vulkan validation with zero errors

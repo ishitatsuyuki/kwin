@@ -1357,7 +1357,7 @@ void VulkanTest::testNativeTargetTransforms()
         OutputTransform::Kind::FlipX180,
         OutputTransform::Kind::FlipX270,
     };
-    const QSize physicalSize(5, 3);
+    const QSize physicalSize(35, 27);
     const QColor base(21, 37, 59, 255);
     const QColor first(231, 43, 79, 255);
     const QColor last(29, 211, 113, 255);
@@ -1392,6 +1392,34 @@ void VulkanTest::testNativeTargetTransforms()
         const Rect lastPhysical = transform.map(Rect(logicalSize.width() - 1, logicalSize.height() - 1, 1, 1), logicalSize);
         QCOMPARE(actual.pixelColor(firstPhysical.center()), first);
         QCOMPARE(actual.pixelColor(lastPhysical.center()), last);
+
+        // Damage expansion is performed in render-target coordinates and
+        // mapped back before scene collection. Verify that the round trip
+        // covers the required tiles for every output transform at a
+        // fractional scale.
+        constexpr double damageScale = 1.25;
+        const RenderViewport damageViewport(
+            RectF(QPointF(10, 20), QSizeF(logicalSize.width() / damageScale, logicalSize.height() / damageScale)),
+            damageScale,
+            target,
+            QPoint());
+        const Region deviceDamage(Rect(5, 7, 4, 3));
+        const Region expandedDamage = ItemRendererVulkan::expandDamageToTileBoundaries(target, damageViewport, deviceDamage);
+        QVERIFY((deviceDamage - expandedDamage).isEmpty());
+
+        const Region targetDamage = damageViewport.mapToRenderTarget(damageViewport.mapFromDeviceCoordinatesAligned(deviceDamage));
+        Region expectedTargetDamage;
+        for (const Rect &rect : targetDamage.rects()) {
+            const int tileSize = int(VulkanCompositor::TileSize);
+            const int left = rect.left() / tileSize * tileSize;
+            const int top = rect.top() / tileSize * tileSize;
+            const int right = (rect.right() + tileSize - 1) / tileSize * tileSize;
+            const int bottom = (rect.bottom() + tileSize - 1) / tileSize * tileSize;
+            expectedTargetDamage |= Rect(left, top, right - left, bottom - top);
+        }
+        expectedTargetDamage &= Rect(QPoint(), physicalSize);
+        const Region expandedTargetDamage = damageViewport.mapToRenderTarget(damageViewport.mapFromDeviceCoordinatesAligned(expandedDamage));
+        QVERIFY((expectedTargetDamage - expandedTargetDamage).isEmpty());
     }
 }
 

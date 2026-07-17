@@ -39,6 +39,15 @@ public:
     bool isValid() const;
     VulkanDevice *device() const;
 
+    /**
+     * Expands device-space damage so that its render-target projection covers
+     * complete compositor tiles. This must happen before scene occlusion and
+     * layer collection.
+     */
+    static Region expandDamageToTileBoundaries(const RenderTarget &renderTarget,
+                                               const RenderViewport &viewport,
+                                               const Region &deviceDamage);
+
     QPainter *painter() const override;
 
     std::unique_ptr<Texture> createTexture(GraphicsBuffer *buffer, const std::shared_ptr<SyncReleasePoint> &releasePoint) override;

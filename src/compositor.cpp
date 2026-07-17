@@ -18,6 +18,7 @@
 #include "core/outputlayer.h"
 #include "core/renderbackend.h"
 #include "core/renderloop.h"
+#include "core/renderviewport.h"
 #include "cursor.h"
 #include "cursorsource.h"
 #include "dbusinterface.h"
@@ -456,7 +457,14 @@ static bool renderLayer(RenderView *view, LogicalOutput *logicalOutput, BackendO
         return false;
     }
     auto &[renderTarget, repaint] = beginInfo.value();
-    const Region bufferDamage = surfaceDamage.united(repaint).intersected(renderTarget.transformedRect());
+    Region bufferDamage = surfaceDamage.united(repaint).intersected(renderTarget.transformedRect());
+    if (renderTarget.vulkanTarget() && !bufferDamage.isEmpty()) {
+        // The Vulkan compositor dispatches complete 16x16 tiles. Expand the
+        // repaint before scene occlusion and layer collection, otherwise the
+        // pixels outside the original damage have no layers and get cleared.
+        const RenderViewport viewport(view->viewport(), view->scale(), renderTarget, view->renderOffset());
+        bufferDamage = ItemRendererVulkan::expandDamageToTileBoundaries(renderTarget, viewport, bufferDamage);
+    }
     view->paint(renderTarget, view->renderOffset(), bufferDamage);
     return view->layer()->endFrame(bufferDamage, surfaceDamage, frame.get());
 }
@@ -499,7 +507,7 @@ static std::optional<std::unordered_map<OutputLayer *, Item *>> assignLayers(Ren
         if (!recommendedSizes.isEmpty()) {
             // it's likely that sizes other than the recommended ones won't work
             const bool compositingAllowed = qobject_cast<CursorItem *>(item) != nullptr;
-            const RectF sceneRect = item->mapToView(compositingAllowed ?  item->boundingRect() : item->rect(), sceneView);
+            const RectF sceneRect = item->mapToView(compositingAllowed ? item->boundingRect() : item->rect(), sceneView);
             const Rect deviceRect = sceneRect.translated(-sceneView->viewport().topLeft()).scaled(sceneView->scale()).rounded();
             const bool hasFittingSize = std::ranges::any_of(recommendedSizes, [compositingAllowed, deviceRect](const QSize &size) {
                 if (compositingAllowed) {

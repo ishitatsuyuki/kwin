@@ -76,6 +76,43 @@ ItemRendererVulkan::~ItemRendererVulkan()
     QObject::disconnect(m_deviceLostConnection);
 }
 
+Region ItemRendererVulkan::expandDamageToTileBoundaries(const RenderTarget &renderTarget,
+                                                        const RenderViewport &viewport,
+                                                        const Region &deviceDamage)
+{
+    if (deviceDamage.isEmpty()) {
+        return deviceDamage;
+    }
+
+    const Region targetDamage = viewport.mapToRenderTarget(viewport.mapFromDeviceCoordinatesAligned(deviceDamage));
+    Region tiledTargetDamage;
+    for (const Rect &rect : targetDamage.rects()) {
+        const int tileSize = int(VulkanCompositor::TileSize);
+        const int left = rect.left() / tileSize * tileSize;
+        const int top = rect.top() / tileSize * tileSize;
+        const int right = (rect.right() + tileSize - 1) / tileSize * tileSize;
+        const int bottom = (rect.bottom() + tileSize - 1) / tileSize * tileSize;
+        tiledTargetDamage |= Rect(left, top, right - left, bottom - top);
+    }
+    tiledTargetDamage &= Rect(QPoint(), renderTarget.size());
+
+    // Map the tile-aligned target damage back to the device coordinate space
+    // consumed by Scene::paint(). Output transforms are inverted before
+    // undoing the viewport scale and offset.
+    const Region untransformedDamage = renderTarget.transform().inverted().map(tiledTargetDamage, renderTarget.size());
+    Region logicalDamage;
+    for (const Rect &rect : untransformedDamage.rects()) {
+        logicalDamage |= RectF(rect)
+                             .translated(viewport.scaledRenderRect().topLeft() - viewport.renderOffset())
+                             .scaled(1.0 / viewport.scale())
+                             .roundedOut();
+    }
+
+    Region expandedDamage = deviceDamage | viewport.mapToDeviceCoordinatesAligned(logicalDamage);
+    expandedDamage &= renderTarget.transformedRect();
+    return expandedDamage;
+}
+
 bool ItemRendererVulkan::isValid() const
 {
     return !m_deviceLost && bool(m_compositor);

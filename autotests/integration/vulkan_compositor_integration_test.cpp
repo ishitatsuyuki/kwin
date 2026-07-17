@@ -37,6 +37,7 @@ class VulkanCompositorIntegrationTest : public QObject
 private Q_SLOTS:
     void initTestCase();
     void testVirtualOutputFrame();
+    void testPartialDamageTileExpansion();
     void testWindowThumbnail();
     void testFallApartOffscreenMesh();
     void testGlide3DMesh();
@@ -185,6 +186,55 @@ void VulkanCompositorIntegrationTest::testVirtualOutputFrame()
     QVERIFY(std::abs(frame.pixelColor(12, 11).green() - 37) <= 1);
     QVERIFY(std::abs(frame.pixelColor(12, 11).blue() - 91) <= 1);
     QCOMPARE(frame.pixelColor(12, 11).alpha(), 255);
+}
+
+void VulkanCompositorIntegrationTest::testPartialDamageTileExpansion()
+{
+    const QList<LogicalOutput *> outputs = workspace()->outputs();
+    QCOMPARE(outputs.size(), 1);
+    const QList<OutputLayer *> layers = Compositor::self()->backend()->compatibleOutputLayers(outputs.front()->backendOutput());
+    QCOMPARE(layers.size(), 1);
+    auto layer = dynamic_cast<VirtualVulkanLayer *>(layers.front());
+    QVERIFY(layer);
+
+    const QColor backgroundColor(31, 97, 211, 255);
+    QImage backgroundImage(QSize(160, 128), QImage::Format_RGBA8888_Premultiplied);
+    backgroundImage.fill(backgroundColor);
+    ImageItem background(kwinApp()->scene()->overlayItem());
+    background.setImage(backgroundImage);
+    background.setSize(backgroundImage.size());
+    background.setZ(-2);
+
+    const QColor foregroundColor(229, 53, 79, 255);
+    QImage foregroundImage(QSize(64, 48), QImage::Format_RGBA8888_Premultiplied);
+    foregroundImage.fill(foregroundColor);
+    ImageItem foreground(kwinApp()->scene()->overlayItem());
+    foreground.setImage(foregroundImage);
+    foreground.setSize(foregroundImage.size());
+    foreground.setPosition(QPointF(37, 29));
+    foreground.setZ(-1);
+
+    kwinApp()->scene()->addRepaintFull();
+    QImage frame;
+    QTRY_VERIFY_WITH_TIMEOUT(([&]() {
+        frame = layer->texture() ? layer->texture()->download() : QImage{};
+        return !frame.isNull()
+            && frame.pixelColor(60, 50) == foregroundColor
+            && frame.pixelColor(33, 20) == backgroundColor;
+    })(),
+                             5000);
+
+    // Moving the foreground produces pixel-exact damage whose surrounding
+    // 16x16 tile margins still need complete scene contents.
+    foreground.setPosition(QPointF(45, 35));
+    QTRY_VERIFY_WITH_TIMEOUT(([&]() {
+        frame = layer->texture() ? layer->texture()->download() : QImage{};
+        return !frame.isNull()
+            && frame.pixelColor(104, 50) == foregroundColor
+            && frame.pixelColor(39, 50) == backgroundColor;
+    })(),
+                             5000);
+    QCOMPARE(frame.pixelColor(33, 20), backgroundColor);
 }
 
 void VulkanCompositorIntegrationTest::testWindowThumbnail()
