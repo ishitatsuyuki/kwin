@@ -95,6 +95,9 @@ void VulkanCompositorBenchmark::benchmarkOverdraw_data()
     QTest::addColumn<int>("layerCount");
     QTest::addColumn<qreal>("opacity");
     QTest::newRow("one-translucent-layer") << 1 << 0.08;
+    QTest::newRow("two-translucent-layers") << 2 << 0.08;
+    QTest::newRow("four-translucent-layers") << 4 << 0.08;
+    QTest::newRow("eight-translucent-layers") << 8 << 0.08;
     QTest::newRow("sixteen-translucent-layers") << 16 << 0.08;
     QTest::newRow("sixty-four-translucent-layers") << 64 << 0.08;
     QTest::newRow("sixty-four-opaque-layers") << 64 << 1.0;
