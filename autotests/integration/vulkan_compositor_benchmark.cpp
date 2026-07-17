@@ -54,6 +54,8 @@ private Q_SLOTS:
     void benchmarkOverdraw();
     void benchmarkColorManagedOverdraw_data();
     void benchmarkColorManagedOverdraw();
+    void benchmarkTileOcclusion_data();
+    void benchmarkTileOcclusion();
     void benchmarkOpenGLOverdraw_data();
     void benchmarkOpenGLOverdraw();
     void benchmarkComputeLatencyUnderGraphicsContention_data();
@@ -129,6 +131,7 @@ void VulkanCompositorBenchmark::benchmarkOverdraw()
             .texturePlanes = {texture.get(), nullptr, nullptr},
             .texturePlaneCount = 1,
             .colorDescription = nullptr,
+            .opaque = opacity >= 1.0,
         });
     }
 
@@ -221,6 +224,71 @@ void VulkanCompositorBenchmark::benchmarkColorManagedOverdraw()
         }
     }
     qInfo().nospace() << "Vulkan color-managed GPU timestamps: preprocess=" << preprocessDuration.count()
+                      << "ns composite=" << compositeDuration.count()
+                      << "ns total=" << (preprocessDuration + compositeDuration).count() << "ns";
+}
+
+void VulkanCompositorBenchmark::benchmarkTileOcclusion_data()
+{
+    QTest::addColumn<QRectF>("opaqueRect");
+    QTest::newRow("tile-aligned-large-window") << QRectF(0, 0, 1440, 800);
+    QTest::newRow("unaligned-large-window") << QRectF(3, 5, 1437, 803);
+    QTest::newRow("unaligned-small-window") << QRectF(417, 289, 641, 397);
+}
+
+void VulkanCompositorBenchmark::benchmarkTileOcclusion()
+{
+    QFETCH(QRectF, opaqueRect);
+    auto compositor = VulkanCompositor::create(m_device);
+    QVERIFY(compositor);
+
+    const auto uploadColor = [this](const QColor &color) {
+        QImage source(1, 1, QImage::Format_RGBA8888_Premultiplied);
+        source.fill(color);
+        return VulkanTexture::upload(m_device,
+                                     source,
+                                     vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                     VulkanQueueRole::Compute);
+    };
+    auto translucentTexture = uploadColor(QColor::fromRgbF(0.4, 0.2, 0.1, 0.08));
+    auto opaqueTexture = uploadColor(QColor::fromRgbF(0.1, 0.3, 0.7, 1.0));
+    QVERIFY(translucentTexture);
+    QVERIFY(opaqueTexture);
+
+    QList<VulkanCompositorLayer> layers;
+    layers.reserve(65);
+    for (int i = 0; i < 64; ++i) {
+        layers.append(VulkanCompositorLayer{
+            .rect = QRectF(0, 0, 1920, 1080),
+            .texture = translucentTexture.get(),
+        });
+    }
+    layers.append(VulkanCompositorLayer{
+        .rect = opaqueRect,
+        .texture = opaqueTexture.get(),
+        .opaque = true,
+    });
+
+    std::chrono::nanoseconds preprocessDuration;
+    std::chrono::nanoseconds compositeDuration;
+    QBENCHMARK {
+        auto result = compositor->render(QSize(1920, 1080),
+                                         layers,
+                                         Qt::black,
+                                         Region(0, 0, 1920, 1080));
+        QVERIFY(result);
+        QVERIFY(result->completionFence.isValid());
+        QVERIFY(waitForCompletion(result->completionFence));
+        if (result->preprocessTime && result->compositeTime) {
+            const auto preprocess = result->preprocessTime->gpuDuration();
+            const auto composite = result->compositeTime->gpuDuration();
+            QVERIFY(preprocess.has_value());
+            QVERIFY(composite.has_value());
+            preprocessDuration = *preprocess;
+            compositeDuration = *composite;
+        }
+    }
+    qInfo().nospace() << "Vulkan tile-occlusion GPU timestamps: preprocess=" << preprocessDuration.count()
                       << "ns composite=" << compositeDuration.count()
                       << "ns total=" << (preprocessDuration + compositeDuration).count() << "ns";
 }
