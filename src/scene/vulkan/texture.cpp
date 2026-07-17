@@ -20,15 +20,34 @@ namespace
 
 QImage uploadImage(const QImage &image)
 {
+    if (VulkanTexture::qImageToVulkanFormat(image.format())) {
+        return image;
+    }
     return image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
 }
 
-std::shared_ptr<VulkanTexture> createImageTexture(VulkanDevice *device, const QImage &image)
+std::shared_ptr<VulkanTexture> createImageTexture(VulkanDevice *device, const QImage &image, VulkanUploadManager *uploadManager)
 {
-    auto texture = VulkanTexture::upload(device,
-                                         uploadImage(image),
-                                         vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled,
-                                         VulkanQueueRole::Compute);
+    const QImage source = uploadImage(image);
+    const auto usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled;
+    std::unique_ptr<VulkanTexture> texture;
+    if (uploadManager) {
+        const auto format = VulkanTexture::qImageToVulkanFormat(source.format());
+        if (format) {
+            texture = VulkanTexture::allocate(device,
+                                              *format,
+                                              source.size(),
+                                              usage,
+                                              VulkanQueueRole::Compute,
+                                              VulkanTexture::qImageToComponentMapping(source.format()));
+            if (texture && !uploadManager->upload(texture.get(), source, Region(0, 0, source.width(), source.height()))
+                && !texture->update(source)) {
+                texture.reset();
+            }
+        }
+    } else {
+        texture = VulkanTexture::upload(device, source, usage, VulkanQueueRole::Compute);
+    }
     return texture ? std::shared_ptr<VulkanTexture>(std::move(texture)) : nullptr;
 }
 
@@ -44,14 +63,15 @@ std::span<const std::shared_ptr<VulkanTexture>> TextureVulkan::nativeTextures() 
     return m_planes;
 }
 
-ImageTextureVulkan::ImageTextureVulkan(VulkanDevice *device)
+ImageTextureVulkan::ImageTextureVulkan(VulkanDevice *device, VulkanUploadManager *uploadManager)
     : m_device(device)
+    , m_uploadManager(uploadManager)
 {
 }
 
-std::unique_ptr<ImageTextureVulkan> ImageTextureVulkan::create(VulkanDevice *device, const QImage &image)
+std::unique_ptr<ImageTextureVulkan> ImageTextureVulkan::create(VulkanDevice *device, const QImage &image, VulkanUploadManager *uploadManager)
 {
-    auto texture = std::make_unique<ImageTextureVulkan>(device);
+    auto texture = std::make_unique<ImageTextureVulkan>(device, uploadManager);
     if (!texture->upload(image)) {
         return nullptr;
     }
@@ -60,7 +80,7 @@ std::unique_ptr<ImageTextureVulkan> ImageTextureVulkan::create(VulkanDevice *dev
 
 bool ImageTextureVulkan::upload(const QImage &image)
 {
-    m_texture = createImageTexture(m_device, image);
+    m_texture = createImageTexture(m_device, image, m_uploadManager);
     if (!m_texture) {
         return false;
     }
@@ -77,21 +97,26 @@ void ImageTextureVulkan::attach(GraphicsBuffer *buffer, const Region &region, co
 void ImageTextureVulkan::upload(const QImage &image, const Rect &region)
 {
     const QImage converted = uploadImage(image);
-    if (!m_texture || converted.size() != m_size || !m_texture->update(converted, Region(region))) {
+    const bool updated = m_texture && converted.size() == m_size
+        && ((m_uploadManager && m_uploadManager->upload(m_texture.get(), converted, Region(region)))
+            || (!m_uploadManager && m_texture->update(converted, Region(region))));
+    if (!updated) {
         upload(converted);
     }
 }
 
-BufferTextureVulkan::BufferTextureVulkan(VulkanDevice *device)
+BufferTextureVulkan::BufferTextureVulkan(VulkanDevice *device, VulkanUploadManager *uploadManager)
     : m_device(device)
+    , m_uploadManager(uploadManager)
 {
 }
 
 std::unique_ptr<BufferTextureVulkan> BufferTextureVulkan::create(VulkanDevice *device,
                                                                  GraphicsBuffer *buffer,
-                                                                 const std::shared_ptr<SyncReleasePoint> &releasePoint)
+                                                                 const std::shared_ptr<SyncReleasePoint> &releasePoint,
+                                                                 VulkanUploadManager *uploadManager)
 {
-    auto texture = std::make_unique<BufferTextureVulkan>(device);
+    auto texture = std::make_unique<BufferTextureVulkan>(device, uploadManager);
     if (!texture->attach(buffer, releasePoint)) {
         return nullptr;
     }
@@ -132,7 +157,7 @@ bool BufferTextureVulkan::attach(GraphicsBuffer *buffer, const std::shared_ptr<S
         if (view.isNull()) {
             return false;
         }
-        m_texture = createImageTexture(m_device, *view.image());
+        m_texture = createImageTexture(m_device, *view.image(), m_uploadManager);
         if (m_texture) {
             m_planes = {m_texture};
         }
@@ -163,7 +188,10 @@ void BufferTextureVulkan::attach(GraphicsBuffer *buffer, const Region &region, c
         return;
     }
     const QImage converted = uploadImage(*view.image());
-    if (!m_texture || converted.size() != m_size || !m_texture->update(converted, region)) {
+    const bool updated = m_texture && converted.size() == m_size
+        && ((m_uploadManager && m_uploadManager->upload(m_texture.get(), converted, region))
+            || (!m_uploadManager && m_texture->update(converted, region)));
+    if (!updated) {
         attach(buffer, releasePoint);
     }
 }

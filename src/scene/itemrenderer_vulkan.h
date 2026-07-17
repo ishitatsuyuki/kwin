@@ -23,6 +23,7 @@ class SurfaceItem;
 class TextureVulkan;
 class VulkanDevice;
 class VulkanRenderTarget;
+class VulkanUploadManager;
 class SyncReleasePoint;
 
 /**
@@ -190,6 +191,7 @@ private:
     FileDescriptor takeAcquireFence();
 
     VulkanDevice *const m_device;
+    std::unique_ptr<VulkanUploadManager> m_uploadManager;
     std::unique_ptr<VulkanCompositor> m_compositor;
     std::optional<VulkanCompositorRenderResult> m_lastResult;
     QList<VulkanCompositorLayer> m_layers;

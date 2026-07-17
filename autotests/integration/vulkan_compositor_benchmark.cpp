@@ -59,6 +59,10 @@ private Q_SLOTS:
     void benchmarkBinning_data();
     void benchmarkBinning();
     void benchmarkDownload();
+    void benchmarkUploadUpdate_data();
+    void benchmarkUploadUpdate();
+    void benchmarkDeferredUploadCpu_data();
+    void benchmarkDeferredUploadCpu();
     void benchmarkOpenGLOverdraw_data();
     void benchmarkOpenGLOverdraw();
     void benchmarkComputeLatencyUnderGraphicsContention_data();
@@ -361,6 +365,83 @@ void VulkanCompositorBenchmark::benchmarkDownload()
         const QImage result = texture->download();
         QVERIFY(!result.isNull());
     }
+}
+
+void VulkanCompositorBenchmark::benchmarkUploadUpdate_data()
+{
+    QTest::addColumn<Region>("damage");
+    QTest::newRow("64x64-damage") << Region(0, 0, 64, 64);
+    QTest::newRow("full-damage") << Region(0, 0, 2048, 1152);
+}
+
+void VulkanCompositorBenchmark::benchmarkUploadUpdate()
+{
+    QFETCH(Region, damage);
+    const QSize size(2048, 1152);
+    QImage source(size, QImage::Format_RGBA8888_Premultiplied);
+    source.fill(QColor(40, 80, 120, 200));
+    auto texture = VulkanTexture::upload(m_device,
+                                         source,
+                                         vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                         VulkanQueueRole::Compute);
+    QVERIFY(texture);
+
+    QBENCHMARK {
+        QVERIFY(texture->update(source, damage));
+    }
+}
+
+void VulkanCompositorBenchmark::benchmarkDeferredUploadCpu_data()
+{
+    benchmarkUploadUpdate_data();
+}
+
+void VulkanCompositorBenchmark::benchmarkDeferredUploadCpu()
+{
+    QFETCH(Region, damage);
+    const QSize size(2048, 1152);
+    QImage source(size, QImage::Format_ARGB32_Premultiplied);
+    source.fill(QColor(40, 80, 120, 200));
+    const auto format = VulkanTexture::qImageToVulkanFormat(source.format());
+    QVERIFY(format.has_value());
+    auto texture = VulkanTexture::allocate(m_device,
+                                           *format,
+                                           size,
+                                           vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                           VulkanQueueRole::Compute,
+                                           VulkanTexture::qImageToComponentMapping(source.format()));
+    QVERIFY(texture);
+    VulkanUploadManager uploads(m_device);
+    const auto submitUploads = [this, &uploads]() {
+        auto commandBuffer = m_device->createComputeCommandBuffer();
+        QVERIFY(commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit}) == vk::Result::eSuccess);
+        QVERIFY(uploads.record(commandBuffer));
+        QVERIFY(commandBuffer.end() == vk::Result::eSuccess);
+        auto fence = m_device->submitCompute(std::move(commandBuffer), {});
+        QVERIFY(fence.has_value());
+        uploads.submitted(*fence);
+        QVERIFY(waitForCompletion(*fence));
+    };
+
+    // Allocate and map the persistent slot before measuring steady-state
+    // damage packing. The warm-up is submitted so the slot can be reused.
+    QVERIFY(uploads.upload(texture.get(), source, Region(0, 0, size.width(), size.height())));
+    submitUploads();
+    constexpr int sampleCount = 50;
+    std::vector<qint64> enqueueTimes;
+    enqueueTimes.reserve(sampleCount);
+    for (int sample = 0; sample < sampleCount; ++sample) {
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(uploads.upload(texture.get(), source, damage));
+        enqueueTimes.push_back(timer.nsecsElapsed());
+        submitUploads();
+    }
+    std::ranges::sort(enqueueTimes);
+    const qint64 median = enqueueTimes[enqueueTimes.size() / 2];
+    const qint64 p95 = enqueueTimes[enqueueTimes.size() * 95 / 100];
+    qInfo().nospace() << "Deferred upload enqueue: median=" << median << "ns p95=" << p95 << "ns";
+    QTest::setBenchmarkResult(median, QTest::WalltimeNanoseconds);
 }
 
 void VulkanCompositorBenchmark::benchmarkOpenGLOverdraw_data()

@@ -59,6 +59,7 @@ QTransform outputTransform(const OutputTransform &transform)
 
 ItemRendererVulkan::ItemRendererVulkan(VulkanDevice *device)
     : m_device(device)
+    , m_uploadManager(std::make_unique<VulkanUploadManager>(device))
     , m_compositor(VulkanCompositor::create(device))
 {
     const QStringList visualizeOptions = qEnvironmentVariable("KWIN_SCENE_VISUALIZE").split(u';', Qt::SkipEmptyParts);
@@ -145,7 +146,7 @@ std::unique_ptr<Texture> ItemRendererVulkan::createTexture(GraphicsBuffer *buffe
     if (m_deviceLost) {
         return nullptr;
     }
-    return BufferTextureVulkan::create(m_device, buffer, releasePoint);
+    return BufferTextureVulkan::create(m_device, buffer, releasePoint, m_uploadManager.get());
 }
 
 std::unique_ptr<Texture> ItemRendererVulkan::createTexture(const QImage &image)
@@ -153,7 +154,7 @@ std::unique_ptr<Texture> ItemRendererVulkan::createTexture(const QImage &image)
     if (m_deviceLost) {
         return nullptr;
     }
-    return ImageTextureVulkan::create(m_device, image);
+    return ImageTextureVulkan::create(m_device, image, m_uploadManager.get());
 }
 
 std::unique_ptr<NinePatch> ItemRendererVulkan::createNinePatch(const QImage &image)
@@ -228,9 +229,25 @@ void ItemRendererVulkan::endFrame()
     }
     if (m_painterOverlayUsed) {
         const auto usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled;
-        const bool uploaded = m_painterTexture && m_painterTexture->size() == m_painterOverlay.size()
-            ? m_painterTexture->update(m_painterOverlay)
-            : bool(m_painterTexture = VulkanTexture::upload(m_device, m_painterOverlay, usage, VulkanQueueRole::Compute));
+        bool uploaded = m_painterTexture && m_painterTexture->size() == m_painterOverlay.size()
+            && m_uploadManager->upload(m_painterTexture.get(), m_painterOverlay, Region(0, 0, m_painterOverlay.width(), m_painterOverlay.height()));
+        if (!uploaded) {
+            const auto format = VulkanTexture::qImageToVulkanFormat(m_painterOverlay.format());
+            if (format) {
+                m_painterTexture = VulkanTexture::allocate(m_device,
+                                                           *format,
+                                                           m_painterOverlay.size(),
+                                                           usage,
+                                                           VulkanQueueRole::Compute,
+                                                           VulkanTexture::qImageToComponentMapping(m_painterOverlay.format()));
+                uploaded = m_painterTexture
+                    && m_uploadManager->upload(m_painterTexture.get(), m_painterOverlay, Region(0, 0, m_painterOverlay.width(), m_painterOverlay.height()));
+            }
+        }
+        if (!uploaded) {
+            m_painterTexture = VulkanTexture::upload(m_device, m_painterOverlay, usage, VulkanQueueRole::Compute);
+            uploaded = bool(m_painterTexture);
+        }
         if (uploaded) {
             m_layers.push_back(VulkanCompositorLayer{
                 .rect = QRectF(QPointF(), QSizeF(m_targetSize)),
@@ -256,8 +273,8 @@ void ItemRendererVulkan::endFrame()
         }
         FileDescriptor acquireFence = takeAcquireFence();
         result = m_vulkanTarget
-            ? m_compositor->renderTo(m_vulkanTarget->texture(), m_layers, Qt::transparent, m_damage, std::move(acquireFence), m_targetColorDescription, m_vulkanTarget->outputColorPipeline())
-            : m_compositor->render(m_targetSize, m_layers, Qt::transparent, m_damage, m_targetColorDescription, nullptr, std::move(acquireFence));
+            ? m_compositor->renderTo(m_vulkanTarget->texture(), m_layers, Qt::transparent, m_damage, std::move(acquireFence), m_targetColorDescription, m_vulkanTarget->outputColorPipeline(), m_uploadManager.get())
+            : m_compositor->render(m_targetSize, m_layers, Qt::transparent, m_damage, m_targetColorDescription, nullptr, std::move(acquireFence), m_uploadManager.get());
     }
     if (!result) {
         qCWarning(KWIN_VULKAN) << "Vulkan scene composition failed";
@@ -447,7 +464,9 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderCurrentLay
                                 Qt::transparent,
                                 Region(Rect(QPoint(), target->size())),
                                 takeAcquireFence(),
-                                colorDescription);
+                                colorDescription,
+                                nullptr,
+                                m_uploadManager.get());
 }
 
 void ItemRendererVulkan::renderBackdropBlur(const QList<QRectF> &shape,
@@ -579,12 +598,12 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
         }
     };
     FileDescriptor pendingAcquireFence = takeAcquireFence();
-    const auto submit = [&frame, &pendingAcquireFence](VulkanCompositor *compositor,
-                                                       VulkanTexture *target,
-                                                       const QList<VulkanCompositorLayer> &layers,
-                                                       const Region &damage,
-                                                       const std::shared_ptr<ColorDescription> &colorDescription) {
-        auto result = compositor->renderTo(target, layers, Qt::transparent, damage, std::move(pendingAcquireFence), colorDescription);
+    const auto submit = [this, &frame, &pendingAcquireFence](VulkanCompositor *compositor,
+                                                             VulkanTexture *target,
+                                                             const QList<VulkanCompositorLayer> &layers,
+                                                             const Region &damage,
+                                                             const std::shared_ptr<ColorDescription> &colorDescription) {
+        auto result = compositor->renderTo(target, layers, Qt::transparent, damage, std::move(pendingAcquireFence), colorDescription, nullptr, m_uploadManager.get());
         if (!result) {
             return false;
         }
@@ -687,11 +706,13 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
                                            Qt::transparent,
                                            fullDamage,
                                            std::move(pendingAcquireFence),
-                                           captureColorDescription);
+                                           captureColorDescription,
+                                           nullptr,
+                                           m_uploadManager.get());
     }
     return m_vulkanTarget
-        ? m_compositor->renderTo(m_vulkanTarget->texture(), finalLayers, Qt::transparent, m_damage, std::move(pendingAcquireFence), m_targetColorDescription, m_vulkanTarget->outputColorPipeline())
-        : m_compositor->render(m_targetSize, finalLayers, Qt::transparent, m_damage, m_targetColorDescription, nullptr, std::move(pendingAcquireFence));
+        ? m_compositor->renderTo(m_vulkanTarget->texture(), finalLayers, Qt::transparent, m_damage, std::move(pendingAcquireFence), m_targetColorDescription, m_vulkanTarget->outputColorPipeline(), m_uploadManager.get())
+        : m_compositor->render(m_targetSize, finalLayers, Qt::transparent, m_damage, m_targetColorDescription, nullptr, std::move(pendingAcquireFence), m_uploadManager.get());
 }
 
 FileDescriptor ItemRendererVulkan::takeAcquireFence()

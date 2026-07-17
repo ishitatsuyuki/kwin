@@ -52,6 +52,8 @@ private Q_SLOTS:
     void initTestCase();
     void testAllocateImage();
     void testUploadPattern();
+    void testDeferredArgbUpload();
+    void testDeferredXrgbUpload();
     void testUpdateRegion();
     void testUpdateCorners();
     void testComputeQueue();
@@ -240,6 +242,100 @@ void VulkanTest::testUploadPattern()
     QColor bottomPixel(downloaded.pixel(3, 10));
     QCOMPARE(bottomPixel.red(), 0);
     QCOMPARE(bottomPixel.blue(), 255);
+}
+
+void VulkanTest::testDeferredArgbUpload()
+{
+#if Q_BYTE_ORDER != Q_LITTLE_ENDIAN
+    QSKIP("Native ARGB32 upload is currently little-endian only");
+#endif
+    const QSize size(17, 11);
+    QImage source(size, QImage::Format_ARGB32_Premultiplied);
+    source.fill(QColor(30, 80, 210, 190));
+    source.setPixelColor(2, 3, QColor(240, 20, 60, 255));
+
+    const auto format = VulkanTexture::qImageToVulkanFormat(source.format());
+    QVERIFY(format.has_value());
+    QCOMPARE(*format, vk::Format::eB8G8R8A8Unorm);
+    auto texture = VulkanTexture::allocate(m_device,
+                                           *format,
+                                           size,
+                                           vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                           VulkanQueueRole::Compute,
+                                           VulkanTexture::qImageToComponentMapping(source.format()));
+    QVERIFY(texture);
+
+    VulkanUploadManager uploads(m_device);
+    QVERIFY(uploads.upload(texture.get(), source, Region(0, 0, size.width(), size.height())));
+    auto compositor = VulkanCompositor::create(m_device);
+    QVERIFY(compositor);
+    const std::array layers{VulkanCompositorLayer{
+        .rect = QRectF(QPointF(), QSizeF(size)),
+        .texture = texture.get(),
+    }};
+    auto initial = compositor->render(size, layers, Qt::transparent, Region::infinite(), nullptr, nullptr, {}, &uploads);
+    QVERIFY(initial);
+    QImage actual = initial->texture->download();
+    QCOMPARE(actual, source.convertToFormat(QImage::Format_RGBA8888_Premultiplied));
+
+    QImage updated = source;
+    updated.setPixelColor(8, 5, QColor(15, 230, 90, 128));
+    const Region damage(8, 5, 1, 1);
+    QVERIFY(uploads.upload(texture.get(), updated, damage));
+    auto changed = compositor->render(size, layers, Qt::transparent, damage, nullptr, nullptr, {}, &uploads);
+    QVERIFY(changed);
+    actual = changed->texture->download();
+    QCOMPARE(actual, updated.convertToFormat(QImage::Format_RGBA8888_Premultiplied));
+}
+
+void VulkanTest::testDeferredXrgbUpload()
+{
+#if Q_BYTE_ORDER != Q_LITTLE_ENDIAN
+    QSKIP("Native RGB32 upload is currently little-endian only");
+#endif
+    const QSize size(7, 5);
+    QImage source(size, QImage::Format_RGB32);
+    for (int y = 0; y < size.height(); ++y) {
+        QRgb *line = reinterpret_cast<QRgb *>(source.scanLine(y));
+        for (int x = 0; x < size.width(); ++x) {
+            // XRGB's unused byte is deliberately zero. The image-view swizzle
+            // must make the sampled surface opaque without rewriting pixels.
+            line[x] = (uint32_t(20 + x * 7) << 16) | (uint32_t(40 + y * 11) << 8) | uint32_t(180 - x * 9);
+        }
+    }
+    const auto format = VulkanTexture::qImageToVulkanFormat(source.format());
+    QVERIFY(format.has_value());
+    QCOMPARE(*format, vk::Format::eB8G8R8A8Unorm);
+    const vk::ComponentMapping mapping = VulkanTexture::qImageToComponentMapping(source.format());
+    QCOMPARE(mapping.a, vk::ComponentSwizzle::eOne);
+    auto texture = VulkanTexture::allocate(m_device,
+                                           *format,
+                                           size,
+                                           vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                           VulkanQueueRole::Compute,
+                                           mapping);
+    QVERIFY(texture);
+
+    VulkanUploadManager uploads(m_device);
+    QVERIFY(uploads.upload(texture.get(), source, Region(0, 0, size.width(), size.height())));
+    auto compositor = VulkanCompositor::create(m_device);
+    QVERIFY(compositor);
+    const std::array layers{VulkanCompositorLayer{
+        .rect = QRectF(QPointF(), QSizeF(size)),
+        .texture = texture.get(),
+    }};
+    auto result = compositor->render(size, layers, Qt::transparent, Region::infinite(), nullptr, nullptr, {}, &uploads);
+    QVERIFY(result);
+    const QImage actual = result->texture->download();
+    for (int y = 0; y < size.height(); ++y) {
+        for (int x = 0; x < size.width(); ++x) {
+            const QColor pixel = actual.pixelColor(x, y);
+            QCOMPARE(pixel.alpha(), 255);
+            QCOMPARE(pixel.red(), 20 + x * 7);
+            QCOMPARE(pixel.green(), 40 + y * 11);
+            QCOMPARE(pixel.blue(), 180 - x * 9);
+        }
+    }
 }
 
 void VulkanTest::testUpdateRegion()

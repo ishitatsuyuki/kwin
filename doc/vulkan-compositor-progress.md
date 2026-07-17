@@ -429,6 +429,46 @@ thumbnail, asserts that Qt Quick receives a native texture rather than a
 `QImage`, then damages the source and verifies a second frame. This covers the
 producer fence, GL consumer fence, and safe target-slot reuse under validation.
 
+## Resolved performance bug: shared-memory uploads blocked frame rendering
+
+Observed on 2026-07-17 as missed render deadlines with samples rooted in
+`QImage::convertToFormat_helper()` from `BufferTextureVulkan::attach()`. Common
+little-endian `Format_ARGB32_Premultiplied` and `Format_RGB32` shared-memory
+buffers were converted to RGBA8888 in full, copied into a newly allocated
+full-image staging buffer even for small damage, submitted separately, and
+synchronously waited before scene collection could continue.
+
+These QImage formats now upload directly as Vulkan B8G8R8A8. RGB32 image views
+swizzle alpha to one so the unused native X byte cannot make an opaque surface
+transparent. Uploads pack only damaged rows into a persistently mapped,
+three-slot staging ring and record their transfers at the start of the compute
+composition command buffer. Pending-upload ownership follows the texture, so
+nested/offscreen compositors that sample a newly updated texture also record
+the right transfer. The standalone `VulkanTexture::update()` compatibility path
+remains synchronous but now allocates and copies only the damaged rectangles.
+
+ARGB partial-damage and RGB32 alpha-swizzle regressions cover the new native
+formats. The existing legacy GL shader bridge test also exercises the
+cross-renderer pending-upload handoff that caught a missing transfer during
+development. A steady-state CPU enqueue benchmark and the synchronous
+compatibility benchmark preserve both workloads.
+
+The comparison used base commit `08eb76c50d`, the RelWithDebInfo build on the
+Navi 10/RADV test machine, Qt 6.11.1, the dedicated compute queue at normal
+priority, the `3D_FULL_SCREEN` amdgpu power profile, and no Vulkan validation.
+At 2048x1152, the old ARGB-to-RGBA conversion alone took 1.49 ms. The old
+synchronous upload took 2.0 ms for 64x64 damage and 2.3 ms for full damage.
+After the change, synchronous updates take 0.11 ms and 2.5 ms respectively;
+the frame-integrated path removes the separate submission/fence wait and its
+median CPU enqueue cost is 1.904 us for 64x64 damage and 0.386 ms for full
+damage. The full synchronous path is intentionally not the optimized frame
+path and pays for packed-row staging before its blocking submit.
+
+```sh
+build/bin/vulkanCompositorBenchmark -median 5 \
+    benchmarkUploadUpdate benchmarkDeferredUploadCpu
+```
+
 ## Planned optimization passes
 
 Compact variable-length tile lists remain deferred; summarized fixed-width

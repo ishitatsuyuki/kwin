@@ -32,6 +32,7 @@ namespace KWin
 class VulkanDevice;
 class VulkanRenderTimeQuery;
 class VulkanTexture;
+class VulkanUploadManager;
 class ColorPipeline;
 
 struct KWIN_EXPORT VulkanSolidLayer
@@ -171,7 +172,8 @@ public:
                                                        const Region &damage = Region::infinite(),
                                                        const std::shared_ptr<ColorDescription> &targetColorDescription = nullptr,
                                                        const ColorPipeline *outputColorPipeline = nullptr,
-                                                       FileDescriptor &&acquireFence = {});
+                                                       FileDescriptor &&acquireFence = {},
+                                                       VulkanUploadManager *uploadManager = nullptr);
     /**
      * Composites directly into an existing compute-writable texture. The
      * caller is responsible for including the complete target in @a damage
@@ -184,7 +186,8 @@ public:
                                                          const Region &damage,
                                                          FileDescriptor &&acquireFence = {},
                                                          const std::shared_ptr<ColorDescription> &targetColorDescription = nullptr,
-                                                         const ColorPipeline *outputColorPipeline = nullptr);
+                                                         const ColorPipeline *outputColorPipeline = nullptr,
+                                                         VulkanUploadManager *uploadManager = nullptr);
 
     VulkanTexture *texture() const;
     QSize size() const;
@@ -242,7 +245,8 @@ private:
                                                          bool forceFullDamage,
                                                          FileDescriptor &&acquireFence,
                                                          const std::shared_ptr<ColorDescription> &targetColorDescription,
-                                                         const ColorPipeline *outputColorPipeline);
+                                                         const ColorPipeline *outputColorPipeline,
+                                                         VulkanUploadManager *uploadManager);
     bool updateTextureDescriptors(std::span<const TextureBatch> batches,
                                   std::vector<vk::ImageMemoryBarrier2> &acquireBarriers,
                                   std::vector<vk::ImageMemoryBarrier2> &releaseBarriers);

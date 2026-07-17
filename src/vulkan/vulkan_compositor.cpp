@@ -273,7 +273,7 @@ std::optional<vk::raii::ImageView> createImageView(const vk::raii::Device &devic
         texture->handle(),
         vk::ImageViewType::e2D,
         texture->format(),
-        vk::ComponentMapping{},
+        texture->componentMapping(),
         vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     });
     if (result != vk::Result::eSuccess) {
@@ -987,7 +987,8 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::render(const QSize
                                                                      const Region &damage,
                                                                      const std::shared_ptr<ColorDescription> &targetColorDescription,
                                                                      const ColorPipeline *outputColorPipeline,
-                                                                     FileDescriptor &&acquireFence)
+                                                                     FileDescriptor &&acquireFence,
+                                                                     VulkanUploadManager *uploadManager)
 {
     if (!m_device) {
         return std::nullopt;
@@ -997,7 +998,7 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::render(const QSize
     if (!m_device || !ensureTarget(size)) {
         return std::nullopt;
     }
-    return renderTo(m_texture.get(), layers, background, damage, targetChanged, std::move(acquireFence), targetColorDescription, outputColorPipeline);
+    return renderTo(m_texture.get(), layers, background, damage, targetChanged, std::move(acquireFence), targetColorDescription, outputColorPipeline, uploadManager);
 }
 
 std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTexture *target,
@@ -1006,9 +1007,10 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                                                                        const Region &damage,
                                                                        FileDescriptor &&acquireFence,
                                                                        const std::shared_ptr<ColorDescription> &targetColorDescription,
-                                                                       const ColorPipeline *outputColorPipeline)
+                                                                       const ColorPipeline *outputColorPipeline,
+                                                                       VulkanUploadManager *uploadManager)
 {
-    return renderTo(target, layers, background, damage, false, std::move(acquireFence), targetColorDescription, outputColorPipeline);
+    return renderTo(target, layers, background, damage, false, std::move(acquireFence), targetColorDescription, outputColorPipeline, uploadManager);
 }
 
 std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTexture *target,
@@ -1018,7 +1020,8 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                                                                        bool forceFullDamage,
                                                                        FileDescriptor &&acquireFence,
                                                                        const std::shared_ptr<ColorDescription> &targetColorDescription,
-                                                                       const ColorPipeline *outputColorPipeline)
+                                                                       const ColorPipeline *outputColorPipeline,
+                                                                       VulkanUploadManager *uploadManager)
 {
     if (!m_device || !target || layers.size() > std::numeric_limits<uint32_t>::max()) {
         return std::nullopt;
@@ -1457,9 +1460,31 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         .outputLutParameters = applyOutputLut ? std::array<float, 4>{float(outputColorPipeline->inputRange.min), float(outputColorPipeline->inputRange.max), float(OutputLutEdgeSize), 0.0f} : std::array<float, 4>{},
     };
 
+    std::vector<VulkanUploadManager *> pendingUploadManagers;
+    for (const TextureBatch &batch : batches) {
+        for (VulkanTexture *texture : batch.textures) {
+            VulkanUploadManager *manager = texture->pendingUploadManager();
+            if (manager && !std::ranges::contains(pendingUploadManagers, manager)) {
+                pendingUploadManagers.push_back(manager);
+            }
+        }
+    }
+    if (uploadManager && uploadManager->hasPendingUploads()
+        && !std::ranges::contains(pendingUploadManagers, uploadManager)) {
+        pendingUploadManagers.push_back(uploadManager);
+    }
+
     auto commandBuffer = m_device->createComputeCommandBuffer();
     if (!*commandBuffer || commandBuffer.begin(vk::CommandBufferBeginInfo{vk::CommandBufferUsageFlagBits::eOneTimeSubmit}) != vk::Result::eSuccess) {
         return std::nullopt;
+    }
+    for (VulkanUploadManager *manager : pendingUploadManagers) {
+        if (!manager->record(commandBuffer)) {
+            for (VulkanUploadManager *pending : pendingUploadManagers) {
+                pending->submissionFailed();
+            }
+            return std::nullopt;
+        }
     }
 
     const vk::BufferMemoryBarrier2 hostBarrier{
@@ -1650,11 +1675,20 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
         compositeQuery->end(commandBuffer);
     }
     if (commandBuffer.end() != vk::Result::eSuccess) {
+        for (VulkanUploadManager *manager : pendingUploadManagers) {
+            manager->submissionFailed();
+        }
         return std::nullopt;
     }
     auto completionFence = m_device->submitCompute(std::move(commandBuffer), std::move(acquireFence));
     if (!completionFence) {
+        for (VulkanUploadManager *manager : pendingUploadManagers) {
+            manager->submissionFailed();
+        }
         return std::nullopt;
+    }
+    for (VulkanUploadManager *manager : pendingUploadManagers) {
+        manager->submitted(*completionFence);
     }
     m_currentFrame->completionFence = completionFence->duplicate();
 
