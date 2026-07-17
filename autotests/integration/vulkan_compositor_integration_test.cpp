@@ -9,6 +9,7 @@
 #include "compositor.h"
 #include "core/outputconfiguration.h"
 #include "core/renderbackend.h"
+#include "core/renderloop.h"
 #include "effect/effecthandler.h"
 #include "effect/effectloader.h"
 #include "effect/offscreeneffect.h"
@@ -24,10 +25,14 @@
 #include "workspace.h"
 
 #include <KConfigGroup>
+#include <KWayland/Client/compositor.h>
+#include <KWayland/Client/region.h>
 #include <KWayland/Client/surface.h>
 #include <QPainter>
 #include <QQuickWindow>
 #include <QRasterWindow>
+
+#include <limits>
 
 namespace KWin
 {
@@ -47,6 +52,8 @@ private Q_SLOTS:
     void testSheet3DMesh();
     void testOffscreenColorFilters();
     void testBackdropBlur();
+    void testBackdropBlurOpaqueSurfaceFade_data();
+    void testBackdropBlurOpaqueSurfaceFade();
     void testScreenCaptureEffects();
     void testScreenTransform();
     void testStartupFeedbackOverlay();
@@ -574,6 +581,130 @@ void VulkanCompositorIntegrationTest::testBackdropBlur()
                              5000);
 
     window.hide();
+    effects->unloadEffect(QStringLiteral("blur"));
+}
+
+void VulkanCompositorIntegrationTest::testBackdropBlurOpaqueSurfaceFade_data()
+{
+    QTest::addColumn<bool>("declaresOpaqueRegion");
+
+    QTest::newRow("declared-opaque") << true;
+    QTest::newRow("buffer-only-opaque") << false;
+}
+
+void VulkanCompositorIntegrationTest::testBackdropBlurOpaqueSurfaceFade()
+{
+    QFETCH(bool, declaresOpaqueRegion);
+
+    QVERIFY(effects->loadEffect(QStringLiteral("blur")));
+    QVERIFY(Test::setupWaylandConnection(Test::AdditionalWaylandInterface::LayerShellV1
+                                         | Test::AdditionalWaylandInterface::AlphaModifierV1
+                                         | Test::AdditionalWaylandInterface::BackgroundEffectV1));
+    QVERIFY(Test::alphaModifier());
+    QVERIFY(Test::backgroundEffectManager());
+
+    const QSize surfaceSize(1280, 96);
+    const auto configureLayerSurface = [&surfaceSize](KWayland::Client::Surface *surface, Test::LayerSurfaceV1 *shellSurface) {
+        shellSurface->set_anchor(Test::LayerSurfaceV1::anchor_top
+                                 | Test::LayerSurfaceV1::anchor_left
+                                 | Test::LayerSurfaceV1::anchor_right);
+        shellSurface->set_size(0, surfaceSize.height());
+        shellSurface->set_exclusive_zone(-1);
+        QSignalSpy configureSpy(shellSurface, &Test::LayerSurfaceV1::configureRequested);
+        surface->commit(KWayland::Client::Surface::CommitFlag::None);
+        if (!configureSpy.wait()) {
+            return false;
+        }
+        if (configureSpy.last().at(1).toSize() != surfaceSize) {
+            return false;
+        }
+        shellSurface->ack_configure(configureSpy.last().at(0).toUInt());
+        return true;
+    };
+
+    QImage oldBackdrop(surfaceSize, QImage::Format_ARGB32_Premultiplied);
+    oldBackdrop.fill(QColor(64, 43, 176));
+    std::unique_ptr<KWayland::Client::Surface> backdropSurface(Test::createSurface());
+    std::unique_ptr<Test::LayerSurfaceV1> backdropShell(Test::createLayerSurfaceV1(backdropSurface.get(), QStringLiteral("blur-backdrop"), nullptr, Test::LayerShellV1::layer_top));
+    QVERIFY(configureLayerSurface(backdropSurface.get(), backdropShell.get()));
+    Window *backdropWindow = Test::renderAndWaitForShown(backdropSurface.get(), oldBackdrop);
+    QVERIFY(backdropWindow);
+
+    std::unique_ptr<KWayland::Client::Surface> panelSurface(Test::createSurface());
+    std::unique_ptr<Test::LayerSurfaceV1> panelShell(Test::createLayerSurfaceV1(panelSurface.get(), QStringLiteral("blur-panel"), nullptr, Test::LayerShellV1::layer_overlay));
+    std::unique_ptr<KWayland::Client::Region> opaqueRegion;
+    if (declaresOpaqueRegion) {
+        opaqueRegion = Test::waylandCompositor()->createRegion(QRegion(QRect(QPoint(), surfaceSize)));
+        panelSurface->setOpaqueRegion(opaqueRegion.get());
+    }
+    auto blurRegion = Test::waylandCompositor()->createRegion(QRegion(QRect(QPoint(), surfaceSize)));
+    auto backgroundEffect = std::make_unique<Test::BackgroundEffectSurfaceV1>(Test::backgroundEffectManager()->get_background_effect(*panelSurface));
+    backgroundEffect->set_blur_region(*blurRegion);
+    auto alphaModifier = std::make_unique<Test::AlphaModifierSurfaceV1>(Test::alphaModifier()->get_surface(*panelSurface));
+    alphaModifier->set_multiplier(std::numeric_limits<uint32_t>::max());
+    QVERIFY(configureLayerSurface(panelSurface.get(), panelShell.get()));
+
+    const QColor panelColor(42, 214, 91);
+    Window *panelWindow = Test::renderAndWaitForShown(panelSurface.get(), surfaceSize, panelColor);
+    QVERIFY(panelWindow);
+
+    const QList<OutputLayer *> layers = Compositor::self()->backend()->compatibleOutputLayers(workspace()->outputs().front()->backendOutput());
+    auto layer = dynamic_cast<VirtualVulkanLayer *>(layers.front());
+    QVERIFY(layer);
+    auto waitForFrame = [&]() {
+        QSignalSpy presentedSpy(workspace()->outputs().front()->backendOutput()->renderLoop(), &RenderLoop::framePresented);
+        kwinApp()->scene()->addRepaintFull();
+        return presentedSpy.wait();
+    };
+    QVERIFY(waitForFrame());
+
+    QImage newBackdrop(surfaceSize, QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < newBackdrop.height(); ++y) {
+        for (int x = 0; x < newBackdrop.width(); ++x) {
+            newBackdrop.setPixelColor(x, y, ((x / 16 + y / 16) % 2) ? QColor(226, 37, 57) : QColor(31, 91, 229));
+        }
+    }
+    QSignalSpy backdropDamagedSpy(backdropWindow, &Window::damaged);
+    Test::render(backdropSurface.get(), newBackdrop);
+    QTRY_VERIFY_WITH_TIMEOUT(backdropDamagedSpy.count() > 0, 5000);
+    QVERIFY(waitForFrame());
+
+    alphaModifier->set_multiplier(std::numeric_limits<uint32_t>::max() / 2);
+    panelSurface->commit(KWayland::Client::Surface::CommitFlag::None);
+    QVERIFY(waitForFrame());
+    const QImage blurredFrame = layer->texture()->download();
+    QVERIFY(!blurredFrame.isNull());
+
+    backgroundEffect.reset();
+    panelSurface->commit(KWayland::Client::Surface::CommitFlag::None);
+    QVERIFY(waitForFrame());
+    const QImage referenceFrame = layer->texture()->download();
+    QVERIFY(!referenceFrame.isNull());
+
+    int maximumDifference = 0;
+    for (int y = 8; y < surfaceSize.height() - 8; ++y) {
+        for (int x = 8; x < surfaceSize.width() - 8; ++x) {
+            const QColor actual = blurredFrame.pixelColor(x, y);
+            const QColor expected = referenceFrame.pixelColor(x, y);
+            maximumDifference = std::max({maximumDifference,
+                                          std::abs(actual.red() - expected.red()),
+                                          std::abs(actual.green() - expected.green()),
+                                          std::abs(actual.blue() - expected.blue()),
+                                          std::abs(actual.alpha() - expected.alpha())});
+        }
+    }
+    QVERIFY2(maximumDifference <= 2, qPrintable(QStringLiteral("opaque surface fade exposed backdrop blur; maximum channel difference was %1").arg(maximumDifference)));
+
+    panelShell.reset();
+    QVERIFY(Test::waitForWindowClosed(panelWindow));
+    backdropShell.reset();
+    QVERIFY(Test::waitForWindowClosed(backdropWindow));
+    alphaModifier.reset();
+    blurRegion.reset();
+    opaqueRegion.reset();
+    panelSurface.reset();
+    backdropSurface.reset();
+    Test::destroyWaylandConnection();
     effects->unloadEffect(QStringLiteral("blur"));
 }
 

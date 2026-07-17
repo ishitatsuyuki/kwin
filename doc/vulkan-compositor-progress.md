@@ -384,6 +384,32 @@ regression renders a directly positioned root item with simultaneous scale and
 translation at 1.25x output scale and compares Vulkan with both an explicit
 reference and the OpenGL renderer.
 
+## Resolved bug: opaque blurred surfaces exposed stale backdrops while fading
+
+Observed on 2026-07-18 as purple or wallpaper-colored panel and logout-screen
+transitions, most reliably when a fullscreen window made Plasma's adaptive
+panel opaque. The surface contents faded through the Wayland alpha modifier,
+but scene occlusion still used the surface's intrinsic opaque region without
+the item opacity. The fullscreen window underneath could therefore be omitted
+from the repaint while the separately rendered backdrop blur sampled preserved
+wallpaper pixels. Independently modulating the blur and surface also cannot
+represent group opacity: it can reveal a filtered backdrop that the opaque
+surface fully hides before the fade.
+
+Opaque-region collection now accounts for inherited item opacity, keeping the
+real backdrop renderable during surface fades. For Vulkan, the blur effect
+brackets the window layers associated with each backdrop blur. The renderer
+first removes regions the surface guarantees are intrinsically opaque, since
+those pixels hide the blur even inside a faded group. It composes any remaining
+full-strength blur and intrinsic surface contents together, then interpolates
+that completed group against the untouched scene exactly once using the
+combined window, paint-effect, and surface opacity. A failed blur pass falls
+back to ordinary unblurred composition with the same group opacity. The
+Vulkan integration regression changes a checkerboard backdrop while an opaque
+blurred layer-shell surface covers it, applies `wp_alpha_modifier_v1`, and
+compares the result with the blur-free reference under validation both with and
+without a declared Wayland opaque region.
+
 ## Resolved performance bug: Vulkan readback used uncached host memory
 
 Observed on 2026-07-17 as very slow Vulkan-rendered `WindowThumbnail` updates.

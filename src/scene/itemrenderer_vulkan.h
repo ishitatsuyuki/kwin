@@ -112,7 +112,11 @@ public:
                             int noiseStrength,
                             const QMatrix4x4 &colorMatrix,
                             const std::optional<QRectF> &roundedRect = std::nullopt,
-                            const QVector4D &cornerRadii = {});
+                            const QVector4D &cornerRadii = {},
+                            qreal groupOpacity = 1.0,
+                            Item *groupRoot = nullptr,
+                            SurfaceItem *groupSurface = nullptr);
+    void finishBackdropBlur();
 
 private:
     struct RoundedClip
@@ -124,6 +128,8 @@ private:
     struct BackdropBlur
     {
         size_t layerIndex = 0;
+        std::optional<size_t> groupEndLayerIndex;
+        qreal groupOpacity = 1.0;
         QList<QRectF> shape;
         uint32_t iterationCount = 1;
         qreal offset = 1.0;
@@ -139,11 +145,19 @@ private:
     {
         std::unique_ptr<VulkanTexture> sceneA;
         std::unique_ptr<VulkanTexture> sceneB;
+        std::unique_ptr<VulkanTexture> sceneC;
         std::vector<std::unique_ptr<VulkanTexture>> levels;
         std::unique_ptr<VulkanCompositor> fullSizeCompositor;
         std::vector<std::unique_ptr<VulkanCompositor>> levelCompositors;
         FileDescriptor completionFence;
         QSize size;
+    };
+
+    struct ActiveBackdropBlurGroup
+    {
+        size_t blurIndex;
+        Item *root;
+        SurfaceItem *surface;
     };
 
     void collectItem(Item *item,
@@ -195,6 +209,7 @@ private:
     std::optional<VulkanCompositorRenderResult> m_lastResult;
     QList<VulkanCompositorLayer> m_layers;
     QList<BackdropBlur> m_backdropBlurs;
+    std::optional<ActiveBackdropBlurGroup> m_activeBackdropBlurGroup;
     std::array<BlurFrameResources, 3> m_blurFrames;
     uint32_t m_nextBlurFrame = 0;
     mutable QImage m_painterOverlay;

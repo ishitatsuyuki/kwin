@@ -524,6 +524,11 @@ void BlurEffect::drawWindow(const RenderTarget &renderTarget, const RenderViewpo
 
     // Draw the window over the blurred area
     effects->drawWindow(renderTarget, viewport, w, mask, deviceRegion, data);
+    if (effects->compositingType() == VulkanCompositing) {
+        if (auto renderer = dynamic_cast<ItemRendererVulkan *>(effects->scene()->renderer())) {
+            renderer->finishBackdropBlur();
+        }
+    }
 }
 
 GLTexture *BlurEffect::ensureNoiseTexture()
@@ -585,10 +590,31 @@ void BlurEffect::blur(const RenderTarget &renderTarget, const RenderViewport &vi
 
     blurShape.translate(w->pos());
 
+    SurfaceItem *surfaceItem = w->window()->surfaceItem();
+    if (surfaceItem) {
+        // The blur is visually associated with the surface, but it is rendered
+        // before the surface itself. Intrinsically opaque pixels hide the blur
+        // inside the full-strength window group even when that group is faded.
+        RegionF opaque = surfaceItem->mapToScene(surfaceItem->opaque());
+        opaque.translate(-w->pos());
+        if (data.xScale() != 1 || data.yScale() != 1) {
+            opaque.scale(data.xScale(), data.yScale());
+        }
+        if (data.xTranslation() || data.yTranslation()) {
+            opaque.translate(data.xTranslation(), data.yTranslation());
+        }
+        opaque.translate(w->pos());
+        blurShape -= opaque;
+    }
+
+    if (blurShape.isEmpty()) {
+        return;
+    }
+
     const Rect backgroundRect = blurShape.boundingRect().rounded();
     const Rect scaledBackgroundRect = backgroundRect.scaled(viewport.scale()).rounded();
     const Rect deviceBackgroundRect = viewport.mapToDeviceCoordinates(backgroundRect).rounded();
-    const auto opacity = w->opacity() * data.opacity();
+    const auto opacity = w->opacity() * data.opacity() * (surfaceItem ? surfaceItem->opacity() : 1.0);
 
     // Get the effective shape that will be actually blurred. It's possible that all of it will be clipped.
     QList<RectF> effectiveShape;
@@ -648,12 +674,15 @@ void BlurEffect::blur(const RenderTarget &renderTarget, const RenderViewport &vi
         renderer->renderBackdropBlur(targetShape,
                                      uint32_t(m_iterationCount),
                                      m_offset,
-                                     opacity * opacity,
-                                     opacity,
+                                     1.0,
+                                     1.0,
                                      m_noiseStrength,
                                      m_colorMatrix,
                                      roundedRect,
-                                     cornerRadii);
+                                     cornerRadii,
+                                     opacity,
+                                     w->windowItem(),
+                                     surfaceItem);
         return;
     }
 

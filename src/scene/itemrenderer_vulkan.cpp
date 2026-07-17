@@ -68,6 +68,7 @@ ItemRendererVulkan::ItemRendererVulkan(VulkanDevice *device)
         m_deviceLost = true;
         m_layers.clear();
         m_backdropBlurs.clear();
+        m_activeBackdropBlurGroup.reset();
         m_releasePoints.clear();
     });
 }
@@ -205,6 +206,7 @@ void ItemRendererVulkan::beginFrame(const RenderTarget &renderTarget, const Rend
     m_lastResult.reset();
     m_layers.clear();
     m_backdropBlurs.clear();
+    m_activeBackdropBlurGroup.reset();
     m_imageTarget = renderTarget.image();
     m_vulkanTarget = renderTarget.vulkanTarget();
     m_targetSize = renderTarget.size();
@@ -227,6 +229,7 @@ void ItemRendererVulkan::endFrame()
     if (m_deviceLost || !m_compositor || (!m_imageTarget && !m_vulkanTarget) || m_targetSize.isEmpty()) {
         return;
     }
+    finishBackdropBlur();
     if (m_painterOverlayUsed) {
         const auto usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled;
         bool uploaded = m_painterTexture && m_painterTexture->size() == m_painterOverlay.size()
@@ -271,10 +274,20 @@ void ItemRendererVulkan::endFrame()
         if (blurFrame) {
             qCWarning(KWIN_VULKAN) << "Vulkan backdrop blur failed; rendering the scene without blur";
         }
+        QList<VulkanCompositorLayer> fallbackLayers = m_layers;
+        for (const BackdropBlur &blur : std::as_const(m_backdropBlurs)) {
+            if (!blur.groupEndLayerIndex) {
+                continue;
+            }
+            const size_t end = std::min(*blur.groupEndLayerIndex, size_t(fallbackLayers.size()));
+            for (size_t i = std::min(blur.layerIndex, end); i < end; ++i) {
+                fallbackLayers[qsizetype(i)].opacity *= blur.groupOpacity;
+            }
+        }
         FileDescriptor acquireFence = takeAcquireFence();
         result = m_vulkanTarget
-            ? m_compositor->renderTo(m_vulkanTarget->texture(), m_layers, Qt::transparent, m_damage, std::move(acquireFence), m_targetColorDescription, m_vulkanTarget->outputColorPipeline(), m_uploadManager.get())
-            : m_compositor->render(m_targetSize, m_layers, Qt::transparent, m_damage, m_targetColorDescription, nullptr, std::move(acquireFence), m_uploadManager.get());
+            ? m_compositor->renderTo(m_vulkanTarget->texture(), fallbackLayers, Qt::transparent, m_damage, std::move(acquireFence), m_targetColorDescription, m_vulkanTarget->outputColorPipeline(), m_uploadManager.get())
+            : m_compositor->render(m_targetSize, fallbackLayers, Qt::transparent, m_damage, m_targetColorDescription, nullptr, std::move(acquireFence), m_uploadManager.get());
     }
     if (!result) {
         qCWarning(KWIN_VULKAN) << "Vulkan scene composition failed";
@@ -349,9 +362,12 @@ void ItemRendererVulkan::renderItem(const RenderTarget &renderTarget,
         return viewport.mapToRenderTarget(point);
     });
     sceneTransform *= viewportTransform;
+    const qreal parentOpacity = m_activeBackdropBlurGroup && m_activeBackdropBlurGroup->root == item
+        ? 1.0
+        : data.opacity();
     collectItem(item,
                 sceneTransform,
-                data.opacity(),
+                parentOpacity,
                 data.brightness(),
                 data.saturation(),
                 QRectF(static_cast<QRect>(targetClip.boundingRect())),
@@ -477,7 +493,10 @@ void ItemRendererVulkan::renderBackdropBlur(const QList<QRectF> &shape,
                                             int noiseStrength,
                                             const QMatrix4x4 &colorMatrix,
                                             const std::optional<QRectF> &roundedRect,
-                                            const QVector4D &cornerRadii)
+                                            const QVector4D &cornerRadii,
+                                            qreal groupOpacity,
+                                            Item *groupRoot,
+                                            SurfaceItem *groupSurface)
 {
     if (shape.isEmpty() || m_targetSize.isEmpty()) {
         return;
@@ -498,6 +517,8 @@ void ItemRendererVulkan::renderBackdropBlur(const QList<QRectF> &shape,
     }
     m_backdropBlurs.push_back(BackdropBlur{
         .layerIndex = size_t(m_layers.size()),
+        .groupEndLayerIndex = std::nullopt,
+        .groupOpacity = std::clamp(groupOpacity, 0.0, 1.0),
         .shape = shape,
         .iterationCount = std::max(iterationCount, 1u),
         .offset = std::max(offset, 0.0),
@@ -508,6 +529,24 @@ void ItemRendererVulkan::renderBackdropBlur(const QList<QRectF> &shape,
         .roundedRect = roundedRect,
         .cornerRadii = cornerRadii,
     });
+    if (groupRoot) {
+        m_activeBackdropBlurGroup = ActiveBackdropBlurGroup{
+            .blurIndex = size_t(m_backdropBlurs.size() - 1),
+            .root = groupRoot,
+            .surface = groupSurface,
+        };
+    }
+}
+
+void ItemRendererVulkan::finishBackdropBlur()
+{
+    if (!m_activeBackdropBlurGroup) {
+        return;
+    }
+    if (m_activeBackdropBlurGroup->blurIndex < size_t(m_backdropBlurs.size())) {
+        m_backdropBlurs[qsizetype(m_activeBackdropBlurGroup->blurIndex)].groupEndLayerIndex = size_t(m_layers.size());
+    }
+    m_activeBackdropBlurGroup.reset();
 }
 
 ItemRendererVulkan::BlurFrameResources *ItemRendererVulkan::acquireBlurFrame(uint32_t maximumIterationCount)
@@ -539,7 +578,7 @@ ItemRendererVulkan::BlurFrameResources *ItemRendererVulkan::acquireBlurFrame(uin
 bool ItemRendererVulkan::ensureBlurFrameResources(BlurFrameResources &frame, uint32_t maximumIterationCount)
 {
     if (frame.size == m_targetSize
-        && frame.sceneA && frame.sceneB && frame.fullSizeCompositor
+        && frame.sceneA && frame.sceneB && frame.sceneC && frame.fullSizeCompositor
         && frame.levels.size() >= maximumIterationCount
         && frame.levelCompositors.size() >= maximumIterationCount) {
         return true;
@@ -557,8 +596,9 @@ bool ItemRendererVulkan::ensureBlurFrameResources(BlurFrameResources &frame, uin
     };
     frame.sceneA = allocateIntermediate(m_targetSize);
     frame.sceneB = allocateIntermediate(m_targetSize);
+    frame.sceneC = allocateIntermediate(m_targetSize);
     frame.fullSizeCompositor = VulkanCompositor::create(m_device);
-    if (!frame.sceneA || !frame.sceneB || !frame.fullSizeCompositor) {
+    if (!frame.sceneA || !frame.sceneB || !frame.sceneC || !frame.fullSizeCompositor) {
         return false;
     }
 
@@ -595,6 +635,14 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
             });
         }
     };
+    const auto scratch = [&frame](VulkanTexture *first, VulkanTexture *second = nullptr) {
+        for (VulkanTexture *candidate : {frame.sceneA.get(), frame.sceneB.get(), frame.sceneC.get()}) {
+            if (candidate != first && candidate != second) {
+                return candidate;
+            }
+        }
+        return static_cast<VulkanTexture *>(nullptr);
+    };
     FileDescriptor pendingAcquireFence = takeAcquireFence();
     // Intermediate passes are ordered on the compute queue and scratch reuse is
     // gated by the final fence. Their results are otherwise discarded, so do
@@ -626,7 +674,7 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
             return std::nullopt;
         }
 
-        VulkanTexture *scene = base == frame.sceneA.get() ? frame.sceneB.get() : frame.sceneA.get();
+        VulkanTexture *scene = scratch(base);
         QList<VulkanCompositorLayer> sceneLayers;
         appendBase(sceneLayers, base);
         for (size_t i = firstLayer; i < blur.layerIndex; ++i) {
@@ -666,7 +714,7 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
             read = write;
         }
 
-        VulkanTexture *blurredScene = scene == frame.sceneA.get() ? frame.sceneB.get() : frame.sceneA.get();
+        VulkanTexture *blurredScene = scratch(scene);
         QList<VulkanCompositorLayer> blurLayers;
         appendBase(blurLayers, scene);
         for (const QRectF &shapeRect : blur.shape) {
@@ -699,8 +747,42 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
         if (!submit(frame.fullSizeCompositor.get(), blurredScene, blurLayers, fullDamage, nullptr)) {
             return std::nullopt;
         }
+        if (!blur.groupEndLayerIndex) {
+            base = blurredScene;
+            firstLayer = blur.layerIndex;
+            continue;
+        }
+
+        const size_t groupEnd = *blur.groupEndLayerIndex;
+        if (groupEnd < blur.layerIndex || groupEnd > size_t(m_layers.size())) {
+            return std::nullopt;
+        }
+        VulkanTexture *groupScene = scratch(scene, blurredScene);
+        QList<VulkanCompositorLayer> groupLayers;
+        appendBase(groupLayers, blurredScene);
+        for (size_t i = blur.layerIndex; i < groupEnd; ++i) {
+            groupLayers.push_back(m_layers[qsizetype(i)]);
+        }
+        if (!submit(frame.fullSizeCompositor.get(), groupScene, groupLayers, fullDamage, nullptr)) {
+            return std::nullopt;
+        }
+
+        // The blur and the intrinsically rendered window are one visual group.
+        // Interpolate that complete result against the untouched scene once;
+        // fading the two independently would expose the blurred backdrop.
+        QList<VulkanCompositorLayer> fadedGroupLayers;
+        appendBase(fadedGroupLayers, scene);
+        fadedGroupLayers.push_back(VulkanCompositorLayer{
+            .rect = fullRect,
+            .texture = groupScene,
+            .blendMode = VulkanBlendMode::BackdropReplace,
+            .colorFilterParameters = QVector4D(0.0, blur.groupOpacity, 0.0, 0.0),
+        });
+        if (!submit(frame.fullSizeCompositor.get(), blurredScene, fadedGroupLayers, fullDamage, nullptr)) {
+            return std::nullopt;
+        }
         base = blurredScene;
-        firstLayer = blur.layerIndex;
+        firstLayer = groupEnd;
     }
 
     QList<VulkanCompositorLayer> finalLayers;
@@ -762,7 +844,9 @@ void ItemRendererVulkan::collectItem(Item *item,
     itemTransform *= QTransform::fromTranslate(item->position().x(), item->position().y());
     QTransform transform = itemTransform;
     transform *= parentTransform;
-    const qreal opacity = parentOpacity * item->opacity();
+    const bool unmodulatedGroupItem = m_activeBackdropBlurGroup
+        && (m_activeBackdropBlurGroup->root == item || m_activeBackdropBlurGroup->surface == item);
+    const qreal opacity = parentOpacity * (unmodulatedGroupItem ? 1.0 : item->opacity());
     const QList<Item *> children = item->sortedChildItems();
     for (Item *child : children) {
         if (child->z() >= 0) {

@@ -603,20 +603,23 @@ void WorkspaceScene::preparePaintGenericScreen()
     }
 }
 
-static void addOpaqueRegionRecursive(SceneView *view, Item *item, const std::optional<ClipCorner> &parentCorner, Region &ret)
+static void addOpaqueRegionRecursive(SceneView *view, Item *item, const std::optional<ClipCorner> &parentCorner, qreal parentOpacity, Region &ret)
 {
     const std::optional<ClipCorner> corner = calculateClipCorner(item, parentCorner);
-    RegionF opaque = item->opaque();
-    if (corner.has_value()) {
-        opaque = corner->radius.clip(item->opaque(), corner->box);
-    }
-    const Rect deviceRect = snapToPixelGrid(view->mapToDeviceCoordinates(item->mapToView(item->rect(), view)));
-    for (const RectF &rect : opaque.rects()) {
-        ret |= snapToPixelGrid(view->mapToDeviceCoordinates(item->mapToView(rect, view))) & deviceRect;
+    const qreal opacity = parentOpacity * item->opacity();
+    if (opacity >= 1.0) {
+        RegionF opaque = item->opaque();
+        if (corner.has_value()) {
+            opaque = corner->radius.clip(opaque, corner->box);
+        }
+        const Rect deviceRect = snapToPixelGrid(view->mapToDeviceCoordinates(item->mapToView(item->rect(), view)));
+        for (const RectF &rect : opaque.rects()) {
+            ret |= snapToPixelGrid(view->mapToDeviceCoordinates(item->mapToView(rect, view))) & deviceRect;
+        }
     }
     const auto children = item->childItems();
     for (Item *child : children) {
-        addOpaqueRegionRecursive(view, child, corner, ret);
+        addOpaqueRegionRecursive(view, child, corner, opacity, ret);
     }
 }
 
@@ -631,7 +634,7 @@ void WorkspaceScene::preparePaintSimpleScreen()
 
         Region opaque;
         if (window->opacity() == 1.0 && !(data.mask & PAINT_WINDOW_TRANSLUCENT)) {
-            addOpaqueRegionRecursive(painted_delegate, windowItem, std::nullopt, opaque);
+            addOpaqueRegionRecursive(painted_delegate, windowItem, std::nullopt, 1.0, opaque);
         }
         m_paintContext.phase2Data.append(Phase2Data{
             .item = windowItem,
@@ -660,7 +663,7 @@ Region WorkspaceScene::collectDamage()
 
         // Perform an occlusion cull pass, to remove surface damage occluded by opaque windows.
         Region opaque;
-        addOpaqueRegionRecursive(painted_delegate, m_overlayItem.get(), std::nullopt, opaque);
+        addOpaqueRegionRecursive(painted_delegate, m_overlayItem.get(), std::nullopt, 1.0, opaque);
         for (auto &paintData : m_paintContext.phase2Data | std::views::reverse) {
             m_paintContext.deviceDamage |= paintData.deviceRegion - opaque;
 
