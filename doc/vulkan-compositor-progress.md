@@ -368,6 +368,22 @@ Presentation tests now reuse the last rendered framebuffer when one exists. A
 test-only slot is imported only while initially bringing up a layer, before any
 rendered framebuffer is available.
 
+## Resolved bug: window animations used the output origin
+
+Observed on 2026-07-17 as the Squash minimize and unminimize trajectories
+feeling different from the OpenGL compositor. The effect script was unchanged,
+but the Vulkan item traversal applied `WindowPaintData` after the root window
+item's global position. A size animation therefore scaled the position as well
+as the window-local geometry, making the effective animation origin the output
+origin. OpenGL keeps the root position outside the effect transform.
+
+The Vulkan renderer now cancels the traversal's root translation, applies the
+effect transform in window-local coordinates, and then restores the root
+position with the same device-pixel snapping used by OpenGL. The differential
+regression renders a directly positioned root item with simultaneous scale and
+translation at 1.25x output scale and compares Vulkan with both an explicit
+reference and the OpenGL renderer.
+
 ## Resolved performance bug: Vulkan readback used uncached host memory
 
 Observed on 2026-07-17 as very slow Vulkan-rendered `WindowThumbnail` updates.

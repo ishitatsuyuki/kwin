@@ -312,11 +312,22 @@ void ItemRendererVulkan::renderItem(const RenderTarget &renderTarget,
     }
     m_damage |= targetClip;
 
-    QTransform sceneTransform;
+    // Item traversal applies the root item's position before the parent
+    // transform. WindowPaintData, however, transforms window-local geometry;
+    // the root position must remain outside of it, as it does in the OpenGL
+    // renderer. Cancel the traversal translation, apply the effect transform,
+    // then restore the root position snapped to the device pixel grid.
+    const QPointF rootPosition = item->position();
+    const QPointF snappedRootPosition(std::round(rootPosition.x() * viewport.scale()) / viewport.scale(),
+                                      std::round(rootPosition.y() * viewport.scale()) / viewport.scale());
+    QTransform sceneTransform = QTransform::fromTranslate(-rootPosition.x(), -rootPosition.y());
+    QTransform effectTransform;
     if (mask & Scene::PAINT_WINDOW_TRANSFORMED) {
-        sceneTransform.translate(data.xTranslation(), data.yTranslation());
-        sceneTransform.scale(data.xScale(), data.yScale());
+        effectTransform.translate(data.xTranslation(), data.yTranslation());
+        effectTransform.scale(data.xScale(), data.yScale());
     }
+    sceneTransform *= effectTransform;
+    sceneTransform *= QTransform::fromTranslate(snappedRootPosition.x(), snappedRootPosition.y());
     const QTransform viewportTransform = transformFromMapping([&viewport](const QPointF &point) {
         return viewport.mapToRenderTarget(point);
     });

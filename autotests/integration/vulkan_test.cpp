@@ -88,6 +88,7 @@ private Q_SLOTS:
     void testItemRendererNestedTarget();
     void testItemRendererFractionalDebug();
     void testItemRendererScene();
+    void testItemRendererWindowTransform();
     void testDeviceLossRecovery();
 
 private:
@@ -1894,6 +1895,93 @@ void VulkanTest::testItemRendererScene()
     const QImage nativeActual = targetTexture->download();
     const int nativeDifference = maximumChannelDifference(nativeActual, expected);
     QVERIFY2(nativeDifference <= 2, qPrintable(QStringLiteral("maximum native scene renderer channel difference was %1").arg(nativeDifference)));
+}
+
+void VulkanTest::testItemRendererWindowTransform()
+{
+    TestScene scene;
+
+    const QColor windowColor(31, 173, 211);
+    QImage windowImage(16, 8, QImage::Format_RGBA8888_Premultiplied);
+    windowImage.fill(windowColor);
+    ImageItem windowItem(scene.root());
+    windowItem.setImage(windowImage);
+    windowItem.setSize(windowImage.size());
+    windowItem.setPosition(QPointF(16.2, 12.2));
+
+    WindowPaintData paintData;
+    paintData.setXScale(0.5);
+    paintData.setYScale(0.8);
+    paintData += QPointF(-4, 4);
+
+    const qreal outputScale = 1.25;
+    const QSize logicalSize(48, 32);
+    const QSize targetSize = (QSizeF(logicalSize) * outputScale).toSize();
+    const Region outputRegion(Rect(QPoint(), targetSize));
+    QImage expected(targetSize, QImage::Format_RGBA8888_Premultiplied);
+    expected.fill(Qt::transparent);
+    QPainter expectedPainter(&expected);
+    const QPointF snappedDevicePosition(std::round(windowItem.position().x() * outputScale),
+                                        std::round(windowItem.position().y() * outputScale));
+    expectedPainter.fillRect(QRectF(snappedDevicePosition + QPointF(paintData.xTranslation(), paintData.yTranslation()) * outputScale,
+                                    QSizeF(windowItem.size().width() * paintData.xScale() * outputScale,
+                                           windowItem.size().height() * paintData.yScale() * outputScale)),
+                             windowColor);
+    expectedPainter.end();
+
+    const auto render = [&](std::unique_ptr<ItemRenderer> renderer) {
+        QImage image(targetSize, QImage::Format_RGBA8888_Premultiplied);
+        image.fill(Qt::transparent);
+        const RenderTarget target(&image);
+        const RenderViewport viewport(RectF(QPointF(), QSizeF(logicalSize)), outputScale, target, QPoint());
+        ItemRenderer *rendererPointer = renderer.get();
+        scene.attachRenderer(std::move(renderer));
+        rendererPointer->beginFrame(target, viewport);
+        rendererPointer->renderBackground(target, viewport, outputRegion);
+        rendererPointer->renderItem(target,
+                                    viewport,
+                                    &windowItem,
+                                    Scene::PAINT_WINDOW_TRANSFORMED,
+                                    outputRegion,
+                                    paintData,
+                                    {},
+                                    {});
+        rendererPointer->endFrame();
+        return image;
+    };
+
+    if (m_glContext && m_glContext->makeCurrent()) {
+        auto glTargetTexture = GLTexture::allocate(GL_RGBA8, targetSize);
+        QVERIFY(glTargetTexture);
+        GLFramebuffer glFramebuffer(glTargetTexture.get());
+        QVERIFY(glFramebuffer.valid());
+        const RenderTarget glTarget(&glFramebuffer);
+        const RenderViewport glViewport(RectF(QPointF(), QSizeF(logicalSize)), outputScale, glTarget, QPoint());
+        auto glRenderer = std::make_unique<ItemRendererOpenGL>(m_glContext->displayObject());
+        ItemRenderer *glRendererPointer = glRenderer.get();
+        scene.attachRenderer(std::move(glRenderer));
+        glRendererPointer->beginFrame(glTarget, glViewport);
+        glRendererPointer->renderBackground(glTarget, glViewport, outputRegion);
+        glRendererPointer->renderItem(glTarget,
+                                      glViewport,
+                                      &windowItem,
+                                      Scene::PAINT_WINDOW_TRANSFORMED,
+                                      outputRegion,
+                                      paintData,
+                                      {},
+                                      {});
+        glRendererPointer->endFrame();
+        glFinish();
+        const QImage glActual = glTargetTexture->toImage().mirrored();
+        const int glDifference = maximumChannelDifference(glActual, expected);
+        QVERIFY2(glDifference <= 2, qPrintable(QStringLiteral("maximum OpenGL window transform channel difference was %1").arg(glDifference)));
+    }
+
+    auto vulkanRenderer = std::make_unique<ItemRendererVulkan>(m_device);
+    QVERIFY(vulkanRenderer->isValid());
+    const QImage actual = render(std::move(vulkanRenderer));
+    const int difference = maximumChannelDifference(actual, expected);
+    QVERIFY2(difference <= 2, qPrintable(QStringLiteral("maximum Vulkan window transform channel difference was %1").arg(difference)));
 }
 
 void VulkanTest::testDeviceLossRecovery()
