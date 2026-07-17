@@ -621,7 +621,7 @@ void OffscreenData::paint(const RenderTarget &renderTarget, const RenderViewport
         windowTransform *= data.toMatrix(scale);
         const QRectF clipRect = deviceRegion == Region::infinite()
             ? QRectF(QPointF(), QSizeF(renderTarget.size()))
-            : QRectF(static_cast<QRect>(viewport.mapToRenderTarget(viewport.mapFromDeviceCoordinatesAligned(deviceRegion)).boundingRect()));
+            : QRectF(static_cast<QRect>(renderTarget.transform().map(deviceRegion, renderTarget.transformedSize()).boundingRect()));
 
         for (const WindowQuad &quad : quads) {
             std::array<QPointF, 4> vertices;

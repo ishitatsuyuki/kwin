@@ -287,9 +287,11 @@ void ItemRendererVulkan::endFrame()
     painter.drawImage(QPoint(0, 0), image);
 }
 
-void ItemRendererVulkan::renderBackground(const RenderTarget &renderTarget, const RenderViewport &viewport, const Region &deviceRegion)
+void ItemRendererVulkan::renderBackground(const RenderTarget &renderTarget, const RenderViewport &, const Region &deviceRegion)
 {
-    m_damage |= viewport.mapToRenderTarget(viewport.mapFromDeviceCoordinatesAligned(deviceRegion));
+    // Device damage is already in output pixels. Going through logical
+    // coordinates grows exact tile boundaries at fractional output scales.
+    m_damage |= renderTarget.transform().map(deviceRegion, renderTarget.transformedSize());
 }
 
 void ItemRendererVulkan::renderItem(const RenderTarget &renderTarget,
@@ -304,8 +306,7 @@ void ItemRendererVulkan::renderItem(const RenderTarget &renderTarget,
     if (!m_compositor || !item) {
         return;
     }
-    const Region logicalClip = viewport.mapFromDeviceCoordinatesAligned(deviceRegion);
-    const Region targetClip = viewport.mapToRenderTarget(logicalClip);
+    const Region targetClip = renderTarget.transform().map(deviceRegion, renderTarget.transformedSize());
     if (targetClip.isEmpty()) {
         return;
     }

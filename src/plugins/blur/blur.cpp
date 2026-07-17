@@ -619,7 +619,7 @@ void BlurEffect::blur(const RenderTarget &renderTarget, const RenderViewport &vi
         }
         const Region targetClip = deviceRegion == Region::infinite()
             ? Region(0, 0, renderTarget.size().width(), renderTarget.size().height())
-            : viewport.mapToRenderTarget(viewport.mapFromDeviceCoordinatesAligned(deviceRegion));
+            : renderTarget.transform().map(deviceRegion, renderTarget.transformedSize());
         QList<QRectF> targetShape;
         for (const RectF &shapeRect : blurShape.rects()) {
             const QRectF mapped = viewport.mapToRenderTarget(shapeRect);

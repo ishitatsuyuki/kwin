@@ -81,6 +81,7 @@ private Q_SLOTS:
     void testNinePatchUpload();
     void testHighPrecisionIntermediate();
     void testNativeRenderTarget();
+    void testItemRendererExactDamage();
     void testNativeTargetTransforms();
     void testItemRendererPainterOverlay();
     void testItemRendererBackdropBlur();
@@ -1405,6 +1406,46 @@ void VulkanTest::testNativeRenderTarget()
     }
     painter.end();
     QVERIFY(maximumChannelDifference(actual, expected) <= 1);
+}
+
+void VulkanTest::testItemRendererExactDamage()
+{
+    const QSize targetSize(80, 60);
+    auto targetTexture = VulkanTexture::allocate(m_device,
+                                                 vk::Format::eR8G8B8A8Unorm,
+                                                 targetSize,
+                                                 vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled,
+                                                 VulkanQueueRole::Compute);
+    QVERIFY(targetTexture);
+
+    auto compositor = VulkanCompositor::create(m_device);
+    QVERIFY(compositor);
+    const QColor preserved(37, 73, 109, 255);
+    auto initial = compositor->renderTo(targetTexture.get(), {}, preserved, Region(Rect(QPoint(), targetSize)));
+    QVERIFY(initial);
+
+    VulkanRenderTarget vulkanTarget(targetTexture.get(), std::move(initial->completionFence));
+    const RenderTarget renderTarget(&vulkanTarget);
+    const RenderViewport fractionalViewport(RectF(0, 0, 64, 48), 1.25, renderTarget, QPoint());
+    const Region exactTile(16, 16, 16, 16);
+
+    ItemRendererVulkan renderer(m_device);
+    QVERIFY(renderer.isValid());
+    renderer.beginFrame(renderTarget, fractionalViewport);
+    renderer.renderBackground(renderTarget, fractionalViewport, exactTile);
+    renderer.endFrame();
+    QVERIFY(vulkanTarget.takeCompletionFence().isValid());
+
+    QImage expected(targetSize, QImage::Format_RGBA8888_Premultiplied);
+    expected.fill(preserved);
+    QPainter painter(&expected);
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.fillRect(static_cast<QRect>(exactTile.boundingRect()), Qt::transparent);
+    painter.end();
+
+    const QImage actual = targetTexture->download();
+    QVERIFY(!actual.isNull());
+    QCOMPARE(maximumChannelDifference(actual, expected), 0);
 }
 
 void VulkanTest::testNativeTargetTransforms()
