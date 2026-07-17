@@ -458,15 +458,20 @@ static bool renderLayer(RenderView *view, LogicalOutput *logicalOutput, BackendO
     }
     auto &[renderTarget, repaint] = beginInfo.value();
     Region bufferDamage = surfaceDamage.united(repaint).intersected(renderTarget.transformedRect());
+    Region contentDamage = surfaceDamage.intersected(renderTarget.transformedRect());
     if (renderTarget.vulkanTarget() && !bufferDamage.isEmpty()) {
         // The Vulkan compositor dispatches complete 16x16 tiles. Expand the
         // repaint before scene occlusion and layer collection, otherwise the
         // pixels outside the original damage have no layers and get cleared.
-        const RenderViewport viewport(view->viewport(), view->scale(), renderTarget, view->renderOffset());
-        bufferDamage = ItemRendererVulkan::expandDamageToTileBoundaries(renderTarget, viewport, bufferDamage);
+        bufferDamage = ItemRendererVulkan::expandDamageToTileBoundaries(renderTarget, bufferDamage);
+        // Vulkan writes complete tiles even when only part of a tile contains
+        // new surface damage. Track that complete footprint in buffer-age and
+        // KMS/copy damage bookkeeping, without adding old-buffer repair damage
+        // to the journal again.
+        contentDamage = ItemRendererVulkan::expandDamageToTileBoundaries(renderTarget, contentDamage);
     }
     view->paint(renderTarget, view->renderOffset(), bufferDamage);
-    return view->layer()->endFrame(bufferDamage, surfaceDamage, frame.get());
+    return view->layer()->endFrame(bufferDamage, contentDamage, frame.get());
 }
 
 static OutputLayer *findLayer(std::span<OutputLayer *const> layers, OutputLayerType type)

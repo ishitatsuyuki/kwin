@@ -1455,21 +1455,15 @@ void VulkanTest::testNativeTargetTransforms()
         QCOMPARE(actual.pixelColor(firstPhysical.center()), first);
         QCOMPARE(actual.pixelColor(lastPhysical.center()), last);
 
-        // Damage expansion is performed in render-target coordinates and
-        // mapped back before scene collection. Verify that the round trip
-        // covers the required tiles for every output transform at a
-        // fractional scale.
-        constexpr double damageScale = 1.25;
-        const RenderViewport damageViewport(
-            RectF(QPointF(10, 20), QSizeF(logicalSize.width() / damageScale, logicalSize.height() / damageScale)),
-            damageScale,
-            target,
-            QPoint());
+        // Damage is already in output-device pixels. Verify that mapping it to
+        // target tiles and back is exact for every output transform. This must
+        // remain independent of the logical viewport scale; routing it through
+        // a fractional-scale viewport would grow the tile by rounding.
         const Region deviceDamage(Rect(5, 7, 4, 3));
-        const Region expandedDamage = ItemRendererVulkan::expandDamageToTileBoundaries(target, damageViewport, deviceDamage);
+        const Region expandedDamage = ItemRendererVulkan::expandDamageToTileBoundaries(target, deviceDamage);
         QVERIFY((deviceDamage - expandedDamage).isEmpty());
 
-        const Region targetDamage = damageViewport.mapToRenderTarget(damageViewport.mapFromDeviceCoordinatesAligned(deviceDamage));
+        const Region targetDamage = transform.map(deviceDamage, target.transformedSize());
         Region expectedTargetDamage;
         for (const Rect &rect : targetDamage.rects()) {
             const int tileSize = int(VulkanCompositor::TileSize);
@@ -1480,8 +1474,8 @@ void VulkanTest::testNativeTargetTransforms()
             expectedTargetDamage |= Rect(left, top, right - left, bottom - top);
         }
         expectedTargetDamage &= Rect(QPoint(), physicalSize);
-        const Region expandedTargetDamage = damageViewport.mapToRenderTarget(damageViewport.mapFromDeviceCoordinatesAligned(expandedDamage));
-        QVERIFY((expectedTargetDamage - expandedTargetDamage).isEmpty());
+        const Region expandedTargetDamage = transform.map(expandedDamage, target.transformedSize());
+        QCOMPARE(expandedTargetDamage, expectedTargetDamage);
     }
 }
 

@@ -57,6 +57,7 @@ test unless the item explicitly says otherwise.
 - [x] Source buffer release points and output completion fences
 - [x] Tile-aligned Vulkan repaint expansion before scene occlusion/layer collection (partial-damage move regression plus fractional-scale and all-output-transform coverage)
 - [x] DRM presentation tests preserve Vulkan swapchain ages and multi-GPU copy damage history instead of aging untouched test buffers
+- [x] Exact tile damage at fractional output scales using direct output-device/target transform mapping, including tile-footprint buffer-age and KMS/copy damage tracking
 - [x] Wayland explicit host synchronization protocol (`linux-drm-syncobj-v1` acquire fences and per-commit release timelines for output and hardware-cursor dma-bufs; live host protocol trace under Vulkan validation)
 - [x] Screenshot and screencast paths (output, region, and window capture; PipeWire memfd and directly rendered dma-buf buffers with syncobj fences)
 - [x] Embedded and metadata cursor capture paths

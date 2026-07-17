@@ -77,14 +77,20 @@ ItemRendererVulkan::~ItemRendererVulkan()
 }
 
 Region ItemRendererVulkan::expandDamageToTileBoundaries(const RenderTarget &renderTarget,
-                                                        const RenderViewport &viewport,
                                                         const Region &deviceDamage)
 {
     if (deviceDamage.isEmpty()) {
         return deviceDamage;
     }
 
-    const Region targetDamage = viewport.mapToRenderTarget(viewport.mapFromDeviceCoordinatesAligned(deviceDamage));
+    // Device damage is already expressed in output pixels. Map it directly to
+    // the render target instead of round-tripping through logical coordinates.
+    // At fractional output scales that round trip is lossy: for example, a
+    // target-space tile [16, 32) at 1.25x maps back to approximately [15, 33).
+    // The compositor would then dispatch both neighboring tiles while scene
+    // collection only provided layers for the one-pixel overlap, clearing the
+    // rest of those tiles to transparent black.
+    const Region targetDamage = renderTarget.transform().map(deviceDamage, renderTarget.transformedSize());
     Region tiledTargetDamage;
     for (const Rect &rect : targetDamage.rects()) {
         const int tileSize = int(VulkanCompositor::TileSize);
@@ -96,19 +102,12 @@ Region ItemRendererVulkan::expandDamageToTileBoundaries(const RenderTarget &rend
     }
     tiledTargetDamage &= Rect(QPoint(), renderTarget.size());
 
-    // Map the tile-aligned target damage back to the device coordinate space
-    // consumed by Scene::paint(). Output transforms are inverted before
-    // undoing the viewport scale and offset.
+    // Map the tile-aligned target damage back to the output-device coordinate
+    // space consumed by Scene::paint(). Output transforms are lossless for
+    // integer rectangles, so mapping it forward again produces exactly the
+    // same tile boundaries.
     const Region untransformedDamage = renderTarget.transform().inverted().map(tiledTargetDamage, renderTarget.size());
-    Region logicalDamage;
-    for (const Rect &rect : untransformedDamage.rects()) {
-        logicalDamage |= RectF(rect)
-                             .translated(viewport.scaledRenderRect().topLeft() - viewport.renderOffset())
-                             .scaled(1.0 / viewport.scale())
-                             .roundedOut();
-    }
-
-    Region expandedDamage = deviceDamage | viewport.mapToDeviceCoordinatesAligned(logicalDamage);
+    Region expandedDamage = deviceDamage | untransformedDamage;
     expandedDamage &= renderTarget.transformedRect();
     return expandedDamage;
 }

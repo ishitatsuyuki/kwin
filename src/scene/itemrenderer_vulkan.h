@@ -45,7 +45,6 @@ public:
      * layer collection.
      */
     static Region expandDamageToTileBoundaries(const RenderTarget &renderTarget,
-                                               const RenderViewport &viewport,
                                                const Region &deviceDamage);
 
     QPainter *painter() const override;
