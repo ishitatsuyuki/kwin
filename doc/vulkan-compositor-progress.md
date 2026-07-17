@@ -201,6 +201,10 @@ Experiments are preserved on `experiment/vulkan-*` branches. Results so far:
   (about 3% slower).
 - Rejected: two-layer blocked source-over. It increased the simple shader from
   `v21` to `v31` and regressed 16/64-layer composition by about 18-19%.
+- Rejected: integer-aligned `texelFetch`. It was neutral for one unscaled
+  layer, but regressed 16 layers by 5.4% and 64 layers by 8.9% versus RADV's
+  filtered sample path. The experiment and benchmark are preserved on
+  `experiment/vulkan-integer-texel-fetch`.
 - Accepted selectively: an 8x8 workgroup whose invocations each composite a
   2x2 pixel quad. The extra independent texture requests raise register use to
   `v47`/`s62`, so it is selected only for one- and two-layer simple scenes;
