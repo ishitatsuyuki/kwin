@@ -297,6 +297,7 @@ VulkanCompositor::VulkanCompositor(VulkanDevice *device)
     , m_preprocessPipeline(nullptr)
     , m_compositePipeline(nullptr)
     , m_simpleCompositePipeline(nullptr)
+    , m_shallowCompositePipeline(nullptr)
     , m_sampler(nullptr)
     , m_fallbackImageView(nullptr)
 {
@@ -404,7 +405,8 @@ bool VulkanCompositor::createPipelines()
     const auto preprocessModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_preprocess.comp.qsb"));
     const auto compositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite.comp.qsb"));
     const auto simpleCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_simple.comp.qsb"));
-    if (!preprocessModule || !compositeModule || !simpleCompositeModule) {
+    const auto shallowCompositeModule = createShaderModule(m_device->logicalDevice(), QStringLiteral(":/vulkan/tile_composite_simple_2x2.comp.qsb"));
+    if (!preprocessModule || !compositeModule || !simpleCompositeModule || !shallowCompositeModule) {
         return false;
     }
 
@@ -430,12 +432,14 @@ bool VulkanCompositor::createPipelines()
     auto preprocessPipeline = createPipeline(*preprocessModule);
     auto compositePipeline = createPipeline(*compositeModule);
     auto simpleCompositePipeline = createPipeline(*simpleCompositeModule);
-    if (!preprocessPipeline || !compositePipeline || !simpleCompositePipeline) {
+    auto shallowCompositePipeline = createPipeline(*shallowCompositeModule);
+    if (!preprocessPipeline || !compositePipeline || !simpleCompositePipeline || !shallowCompositePipeline) {
         return false;
     }
     m_preprocessPipeline = std::move(*preprocessPipeline);
     m_compositePipeline = std::move(*compositePipeline);
     m_simpleCompositePipeline = std::move(*simpleCompositePipeline);
+    m_shallowCompositePipeline = std::move(*shallowCompositePipeline);
     return true;
 }
 
@@ -1427,8 +1431,10 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                                                        commandBuffer,
                                                        m_device->computeQueueFamily(),
                                                        vk::PipelineStageFlagBits2::eAllCommands);
-    commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute,
-                               useSimpleCompositePipeline ? m_simpleCompositePipeline : m_compositePipeline);
+    const vk::Pipeline compositePipeline = useSimpleCompositePipeline
+        ? (layers.size() <= 2 ? *m_shallowCompositePipeline : *m_simpleCompositePipeline)
+        : *m_compositePipeline;
+    commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, compositePipeline);
     for (uint32_t batchIndex = 0; batchIndex < batchCount; ++batchIndex) {
         const TextureBatch &batch = batches[batchIndex];
         pushConstants.firstLayer = batch.firstLayer;
@@ -1541,6 +1547,7 @@ void VulkanCompositor::releaseResources()
     m_preprocessPipeline.clear();
     m_compositePipeline.clear();
     m_simpleCompositePipeline.clear();
+    m_shallowCompositePipeline.clear();
     m_pipelineLayout.clear();
     m_descriptorSetLayout.clear();
     m_size = {};

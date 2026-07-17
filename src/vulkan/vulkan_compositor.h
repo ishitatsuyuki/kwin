@@ -249,6 +249,7 @@ private:
     vk::raii::Pipeline m_preprocessPipeline;
     vk::raii::Pipeline m_compositePipeline;
     vk::raii::Pipeline m_simpleCompositePipeline;
+    vk::raii::Pipeline m_shallowCompositePipeline;
     vk::raii::Sampler m_sampler;
     std::array<FrameResources, FrameResourceCount> m_frames;
     FrameResources *m_currentFrame = nullptr;

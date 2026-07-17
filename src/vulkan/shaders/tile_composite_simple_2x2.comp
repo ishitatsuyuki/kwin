@@ -1,0 +1,146 @@
+#version 450
+#extension GL_EXT_shader_image_load_formatted : require
+
+// Common source-over pipeline: one 8x8 workgroup maps to one 16x16 output
+// tile, with each invocation processing a 2x2 pixel quad. Every accepted
+// layer is axis-aligned RGBA or a solid color, so the shader only consumes the
+// compact hot records.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct HotLayer
+{
+    vec4 rect;
+    vec4 color;
+    vec4 textureCoordinatesX;
+    vec4 textureCoordinatesY;
+    vec4 effects;
+    uvec4 textureIndices;
+    uvec4 metadata;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer TileBuffer
+{
+    uint tileData[];
+};
+
+layout(set = 0, binding = 2) uniform image2D destination;
+
+layout(set = 0, binding = 3) uniform sampler2D textures[16];
+
+layout(std430, set = 0, binding = 4) readonly buffer DirtyTileBuffer
+{
+    uint dirtyTiles[];
+};
+
+layout(std430, set = 0, binding = 6) readonly buffer HotLayerBuffer
+{
+    HotLayer layers[];
+};
+
+layout(push_constant) uniform Parameters
+{
+    uint layerCount;
+    uint tilesWide;
+    uint flags;
+    uint dirtyTileCount;
+    vec4 background;
+    uint firstLayer;
+    uint lastLayer;
+    uvec2 padding;
+    vec4 outputLutParameters;
+} params;
+
+bool evaluateLayer(HotLayer layer, vec2 samplePosition, out vec4 source)
+{
+    if (samplePosition.x < layer.rect.x || samplePosition.x >= layer.rect.z
+            || samplePosition.y < layer.rect.y || samplePosition.y >= layer.rect.w) {
+        return false;
+    }
+    if (layer.metadata.x > 0u) {
+        vec3 outputPosition = vec3(samplePosition, 1.0);
+        vec2 coordinates = vec2(dot(layer.textureCoordinatesX.xyz, outputPosition),
+                                dot(layer.textureCoordinatesY.xyz, outputPosition));
+        source = texture(textures[layer.textureIndices.x], coordinates);
+        source.rgb *= layer.color.rgb * layer.color.a;
+        source.a *= layer.color.a;
+        float luminance = dot(source.rgb, vec3(0.2126, 0.7152, 0.0722));
+        source.rgb = mix(vec3(luminance), source.rgb, layer.effects.y) * layer.effects.x;
+    } else {
+        source = layer.color;
+    }
+    return true;
+}
+
+void main()
+{
+    uint dirtyTileIndex = gl_WorkGroupID.x;
+    if (dirtyTileIndex >= params.dirtyTileCount) {
+        return;
+    }
+    uint packedTile = dirtyTiles[dirtyTileIndex];
+    uint tileX = packedTile & 0xffffu;
+    uint tileY = packedTile >> 16;
+    uint tileIndex = tileY * params.tilesWide + tileX;
+    ivec2 firstPixel = ivec2(tileX, tileY) * 16 + ivec2(gl_LocalInvocationID.xy) * 2;
+    ivec2 pixels[4] = ivec2[4](firstPixel,
+                               firstPixel + ivec2(1, 0),
+                               firstPixel + ivec2(0, 1),
+                               firstPixel + ivec2(1, 1));
+    ivec2 outputSize = imageSize(destination);
+    bool valid[4];
+    bool anyValid = false;
+    for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
+        valid[pixelIndex] = all(lessThan(pixels[pixelIndex], outputSize));
+        anyValid = anyValid || valid[pixelIndex];
+    }
+    if (!anyValid) {
+        return;
+    }
+
+    uint listBase = tileIndex * (params.layerCount + 1u);
+    uint tileLayerCount = tileData[listBase];
+    vec4 background[4];
+    vec4 result[4];
+    float remaining[4];
+    for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
+        background[pixelIndex] = valid[pixelIndex]
+            ? ((params.flags & (1u << 1)) != 0u
+                   ? imageLoad(destination, pixels[pixelIndex])
+                   : params.background)
+            : vec4(0.0);
+        result[pixelIndex] = vec4(0.0);
+        remaining[pixelIndex] = valid[pixelIndex] ? 1.0 : 0.0;
+    }
+    for (int i = int(tileLayerCount) - 1; i >= 0; --i) {
+        bool anyUncovered = false;
+        for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
+            anyUncovered = anyUncovered || remaining[pixelIndex] > 0.0;
+        }
+        if (!anyUncovered) {
+            break;
+        }
+        uint layerIndex = tileData[listBase + 1u + uint(i)];
+        if (layerIndex < params.firstLayer || layerIndex >= params.lastLayer) {
+            continue;
+        }
+        HotLayer layer = layers[layerIndex];
+        for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
+            if (remaining[pixelIndex] <= 0.0) {
+                continue;
+            }
+            vec4 source;
+            if (!evaluateLayer(layer, vec2(pixels[pixelIndex]) + vec2(0.5), source)) {
+                continue;
+            }
+            result[pixelIndex] += source * remaining[pixelIndex];
+            remaining[pixelIndex] *= 1.0 - source.a;
+        }
+    }
+    for (int pixelIndex = 0; pixelIndex < 4; ++pixelIndex) {
+        if (valid[pixelIndex]) {
+            imageStore(destination,
+                       pixels[pixelIndex],
+                       result[pixelIndex] + background[pixelIndex] * remaining[pixelIndex]);
+        }
+    }
+}

@@ -270,6 +270,7 @@ qt_add_shaders(kwin "vulkan_compute_shaders"
         vulkan/shaders/tile_preprocess.comp
         vulkan/shaders/tile_composite.comp
         vulkan/shaders/tile_composite_simple.comp
+        vulkan/shaders/tile_composite_simple_2x2.comp
 )
 
 target_link_libraries(kwin

@@ -201,6 +201,12 @@ Experiments are preserved on `experiment/vulkan-*` branches. Results so far:
   (about 3% slower).
 - Rejected: two-layer blocked source-over. It increased the simple shader from
   `v21` to `v31` and regressed 16/64-layer composition by about 18-19%.
+- Accepted selectively: an 8x8 workgroup whose invocations each composite a
+  2x2 pixel quad. The extra independent texture requests raise register use to
+  `v47`/`s62`, so it is selected only for one- and two-layer simple scenes;
+  those composition times fall from 81.2 to 58.3 us (-28%) and from 96.6 to
+  81.0 us (-16%), respectively. Four or more layers retain the 16x16 serial
+  kernel and its `v21`/`s46` footprint.
 - Neutral alone: direct UV precomposition; coverage kept the inverse-transform
   work live until the axis-aligned path was introduced.
 
@@ -217,6 +223,7 @@ deferred until profiling demonstrates that their complexity is justified.
 - [x] Prefer host-visible device-local layer records with a compatible host-visible fallback
 - [x] Workgroup and subgroup-size sweep on Navi 10 (16x16 wave64 retained)
 - [x] Two-layer blocked source-over evaluation measured and rejected on Navi 10
+- [x] Multi-pixel invocation variant measured and selected for simple scenes with at most two layers
 - [x] Fixed-stride layer-index lists beyond 64 layers
 - [ ] Compact prefix-summed tile-list allocation (deferred)
 - [ ] Hierarchical AABB binning (deferred)
