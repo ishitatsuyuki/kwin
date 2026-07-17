@@ -56,6 +56,8 @@ private Q_SLOTS:
     void benchmarkColorManagedOverdraw();
     void benchmarkTileOcclusion_data();
     void benchmarkTileOcclusion();
+    void benchmarkBinning_data();
+    void benchmarkBinning();
     void benchmarkOpenGLOverdraw_data();
     void benchmarkOpenGLOverdraw();
     void benchmarkComputeLatencyUnderGraphicsContention_data();
@@ -289,6 +291,56 @@ void VulkanCompositorBenchmark::benchmarkTileOcclusion()
         }
     }
     qInfo().nospace() << "Vulkan tile-occlusion GPU timestamps: preprocess=" << preprocessDuration.count()
+                      << "ns composite=" << compositeDuration.count()
+                      << "ns total=" << (preprocessDuration + compositeDuration).count() << "ns";
+}
+
+void VulkanCompositorBenchmark::benchmarkBinning_data()
+{
+    QTest::addColumn<int>("layerCount");
+    QTest::newRow("one-layer") << 1;
+    QTest::newRow("sixteen-layers") << 16;
+    QTest::newRow("sixty-four-layers") << 64;
+    QTest::newRow("two-hundred-fifty-six-layers") << 256;
+    QTest::newRow("one-thousand-twenty-four-layers") << 1024;
+}
+
+void VulkanCompositorBenchmark::benchmarkBinning()
+{
+    QFETCH(int, layerCount);
+    auto compositor = VulkanCompositor::create(m_device);
+    QVERIFY(compositor);
+
+    QList<VulkanSolidLayer> layers;
+    layers.reserve(layerCount);
+    for (int i = 0; i < layerCount; ++i) {
+        // Keep raster work constant so this measures preprocessing scaling.
+        layers.append(VulkanSolidLayer{
+            .rect = QRectF(2048 + (i & 15), 1152 + ((i >> 4) & 15), 8, 8),
+            .color = QColor::fromRgbF(0.4, 0.2, 0.1, 0.08),
+        });
+    }
+
+    std::chrono::nanoseconds preprocessDuration;
+    std::chrono::nanoseconds compositeDuration;
+    QBENCHMARK {
+        auto result = compositor->render(QSize(1920, 1080),
+                                         layers,
+                                         Qt::black,
+                                         Region(0, 0, 1920, 1080));
+        QVERIFY(result);
+        QVERIFY(result->completionFence.isValid());
+        QVERIFY(waitForCompletion(result->completionFence));
+        if (result->preprocessTime && result->compositeTime) {
+            const auto preprocess = result->preprocessTime->gpuDuration();
+            const auto composite = result->compositeTime->gpuDuration();
+            QVERIFY(preprocess.has_value());
+            QVERIFY(composite.has_value());
+            preprocessDuration = *preprocess;
+            compositeDuration = *composite;
+        }
+    }
+    qInfo().nospace() << "Vulkan binning GPU timestamps: preprocess=" << preprocessDuration.count()
                       << "ns composite=" << compositeDuration.count()
                       << "ns total=" << (preprocessDuration + compositeDuration).count() << "ns";
 }
