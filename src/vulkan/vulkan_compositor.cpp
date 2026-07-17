@@ -562,6 +562,7 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
     const uint32_t binsWide = (tilesWide + TileSize - 1) / TileSize;
     const uint32_t binsHigh = (tilesHigh + TileSize - 1) / TileSize;
     const size_t maskWordCapacity = (layerCapacity + 31) / 32;
+    const size_t summaryWordCapacity = (maskWordCapacity + 31) / 32;
     if (tilesWide > 0x10000u || tilesHigh > 0x10000u) {
         return false;
     }
@@ -577,7 +578,7 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
     };
     const vk::BufferCreateInfo tileBufferInfo{
         vk::BufferCreateFlags{},
-        vk::DeviceSize(tilesWide) * tilesHigh * maskWordCapacity * sizeof(uint32_t),
+        vk::DeviceSize(tilesWide) * tilesHigh * (maskWordCapacity + summaryWordCapacity) * sizeof(uint32_t),
         vk::BufferUsageFlagBits::eStorageBuffer,
     };
     const vk::BufferCreateInfo prefixBufferInfo{

@@ -815,8 +815,12 @@ void main()
     }
 
     uint wordCount = (params.layerCount + 31u) / 32u;
+    uint summaryWordCount = (wordCount + 31u) / 32u;
+    uint tileBase = tileIndex * (summaryWordCount + wordCount);
     uint firstWord = params.firstLayer / 32u;
     uint lastWord = (params.lastLayer + 31u) / 32u;
+    uint firstSummaryWord = firstWord / 32u;
+    uint lastSummaryWord = (lastWord + 31u) / 32u;
     vec2 samplePosition = vec2(pixel) + vec2(0.5);
     vec4 background = (params.flags & (1u << 1)) != 0u
         ? imageLoad(destination, pixel)
@@ -824,59 +828,85 @@ void main()
     vec4 result;
     if ((params.flags & 1u) == 0u) {
         result = background;
-        for (uint word = firstWord; word < lastWord; ++word) {
-            uint mask = tileData[tileIndex * wordCount + word];
-            if (word == firstWord) {
-                mask &= ~0u << (params.firstLayer & 31u);
+        for (uint summaryWord = firstSummaryWord; summaryWord < lastSummaryWord; ++summaryWord) {
+            uint words = tileData[tileBase + summaryWord];
+            if (summaryWord == firstSummaryWord) {
+                words &= ~0u << (firstWord & 31u);
             }
-            uint lastBit = params.lastLayer & 31u;
-            if (word + 1u == lastWord && lastBit != 0u) {
-                mask &= (1u << lastBit) - 1u;
+            uint lastSummaryBit = lastWord & 31u;
+            if (summaryWord + 1u == lastSummaryWord && lastSummaryBit != 0u) {
+                words &= (1u << lastSummaryBit) - 1u;
             }
-            while (mask != 0u) {
-                uint bit = uint(findLSB(mask));
-                mask &= mask - 1u;
-                uint layerIndex = word * 32u + bit;
-                vec4 source;
-                float coverage;
-                if (!evaluateLayer(layers[layerIndex], samplePosition, source, coverage)) {
-                    continue;
+            while (words != 0u) {
+                uint wordBit = uint(findLSB(words));
+                words &= words - 1u;
+                uint word = summaryWord * 32u + wordBit;
+                uint mask = tileData[tileBase + summaryWordCount + word];
+                if (word == firstWord) {
+                    mask &= ~0u << (params.firstLayer & 31u);
                 }
-                result = source + result * (1.0 - source.a);
+                uint lastBit = params.lastLayer & 31u;
+                if (word + 1u == lastWord && lastBit != 0u) {
+                    mask &= (1u << lastBit) - 1u;
+                }
+                while (mask != 0u) {
+                    uint bit = uint(findLSB(mask));
+                    mask &= mask - 1u;
+                    uint layerIndex = word * 32u + bit;
+                    vec4 source;
+                    float coverage;
+                    if (!evaluateLayer(layers[layerIndex], samplePosition, source, coverage)) {
+                        continue;
+                    }
+                    result = source + result * (1.0 - source.a);
+                }
             }
         }
     } else {
         // Destination-out depends on the accumulated destination below it,
         // so preserve strict bottom-to-top Porter-Duff order for those scenes.
         result = background;
-        for (uint word = firstWord; word < lastWord; ++word) {
-            uint mask = tileData[tileIndex * wordCount + word];
-            if (word == firstWord) {
-                mask &= ~0u << (params.firstLayer & 31u);
+        for (uint summaryWord = firstSummaryWord; summaryWord < lastSummaryWord; ++summaryWord) {
+            uint words = tileData[tileBase + summaryWord];
+            if (summaryWord == firstSummaryWord) {
+                words &= ~0u << (firstWord & 31u);
             }
-            uint lastBit = params.lastLayer & 31u;
-            if (word + 1u == lastWord && lastBit != 0u) {
-                mask &= (1u << lastBit) - 1u;
+            uint lastSummaryBit = lastWord & 31u;
+            if (summaryWord + 1u == lastSummaryWord && lastSummaryBit != 0u) {
+                words &= (1u << lastSummaryBit) - 1u;
             }
-            while (mask != 0u) {
-                uint bit = uint(findLSB(mask));
-                mask &= mask - 1u;
-                uint layerIndex = word * 32u + bit;
-                Layer layer = layers[layerIndex];
-                vec4 source;
-                float coverage;
-                if (!evaluateLayer(layer, samplePosition, source, coverage)) {
-                    continue;
+            while (words != 0u) {
+                uint wordBit = uint(findLSB(words));
+                words &= words - 1u;
+                uint word = summaryWord * 32u + wordBit;
+                uint mask = tileData[tileBase + summaryWordCount + word];
+                if (word == firstWord) {
+                    mask &= ~0u << (params.firstLayer & 31u);
                 }
-                if ((layer.metadata.z & (1u << 3)) != 0u) {
-                    result = (source + result) * (1.0 - source.a);
-                } else if ((layer.metadata.z & (1u << 6)) != 0u) {
-                    float amount = clamp(layer.colorFilterParameters.y * coverage, 0.0, 1.0);
-                    result = mix(result, source / max(coverage, 0.0001), amount);
-                } else if ((layer.metadata.z & (1u << 7)) != 0u) {
-                    result += source;
-                } else {
-                    result = source + result * (1.0 - source.a);
+                uint lastBit = params.lastLayer & 31u;
+                if (word + 1u == lastWord && lastBit != 0u) {
+                    mask &= (1u << lastBit) - 1u;
+                }
+                while (mask != 0u) {
+                    uint bit = uint(findLSB(mask));
+                    mask &= mask - 1u;
+                    uint layerIndex = word * 32u + bit;
+                    Layer layer = layers[layerIndex];
+                    vec4 source;
+                    float coverage;
+                    if (!evaluateLayer(layer, samplePosition, source, coverage)) {
+                        continue;
+                    }
+                    if ((layer.metadata.z & (1u << 3)) != 0u) {
+                        result = (source + result) * (1.0 - source.a);
+                    } else if ((layer.metadata.z & (1u << 6)) != 0u) {
+                        float amount = clamp(layer.colorFilterParameters.y * coverage, 0.0, 1.0);
+                        result = mix(result, source / max(coverage, 0.0001), amount);
+                    } else if ((layer.metadata.z & (1u << 7)) != 0u) {
+                        result += source;
+                    } else {
+                        result = source + result * (1.0 - source.a);
+                    }
                 }
             }
         }

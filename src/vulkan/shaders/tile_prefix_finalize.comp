@@ -78,13 +78,24 @@ void main()
         }
     }
 
-    for (uint word = 0u; word < wordCount; ++word) {
-        uint present = globalValue(tileIndex, tileX, tileY, word, wordCount, binsWide, tilesHigh).x;
-        if (int(word) < opaqueWord) {
-            present = 0u;
-        } else if (int(word) == opaqueWord && opaqueBit != 0u) {
-            present &= ~((1u << opaqueBit) - 1u);
+    uint summaryWordCount = (wordCount + 31u) / 32u;
+    uint tileBase = tileIndex * (summaryWordCount + wordCount);
+    for (uint summaryWord = 0u; summaryWord < summaryWordCount; ++summaryWord) {
+        uint nonemptyWords = 0u;
+        uint firstWord = summaryWord * 32u;
+        uint endWord = min(firstWord + 32u, wordCount);
+        for (uint word = firstWord; word < endWord; ++word) {
+            uint present = globalValue(tileIndex, tileX, tileY, word, wordCount, binsWide, tilesHigh).x;
+            if (int(word) < opaqueWord) {
+                present = 0u;
+            } else if (int(word) == opaqueWord && opaqueBit != 0u) {
+                present &= ~((1u << opaqueBit) - 1u);
+            }
+            tileData[tileBase + summaryWordCount + word] = present;
+            if (present != 0u) {
+                nonemptyWords |= 1u << (word & 31u);
+            }
         }
-        tileData[tileIndex * wordCount + word] = present;
+        tileData[tileBase + summaryWord] = nonemptyWords;
     }
 }
