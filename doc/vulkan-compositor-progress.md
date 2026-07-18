@@ -562,6 +562,24 @@ regression suite covers both timing-enabled waits and timing-disabled results,
 and the validation-enabled backdrop-blur regression covers the intermediate
 submission and scratch-resource lifetimes.
 
+## Resolved performance issue: steady-state Vulkan resource churn
+
+Automated review identified several CPU-side operations that were repeated for
+every DRM frame even though their inputs normally remain unchanged. DRM Vulkan
+layers now retain their negotiated format choice until size, alpha, color-power,
+multi-GPU import, or low-bandwidth requirements change, and cache the output
+color-pipeline inputs so ICC LUT construction only runs after a color-state
+change. Vulkan textures own a lazily created reusable image view instead of the
+compositor creating target and sampled views for every frame-resource slot, and
+the host-visible layer, hot-layer, dirty-tile, and output-LUT buffers remain
+mapped for their allocation lifetime.
+
+The same cleanup consolidated full-buffer and plane dma-buf import bookkeeping,
+the renderer-independent CPU nine-patch stitcher, and screencast format
+selection. The backend-specific nine-patch image formats and upload paths remain
+separate. These are deterministic allocation and duplicate-work removals; no
+GPU-time claim or new benchmark baseline is recorded for them.
+
 ## Planned optimization passes
 
 Compact variable-length tile lists remain deferred; summarized fixed-width

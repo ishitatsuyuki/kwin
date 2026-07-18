@@ -97,26 +97,7 @@ std::shared_ptr<VulkanTexture> VulkanDevice::importBuffer(GraphicsBuffer *buffer
     if (!buffer->dmabufAttributes()) {
         return nullptr;
     }
-    auto it = m_importedTextures.find(buffer);
-    if (it != m_importedTextures.end()) {
-        for (const ImportedTexture &imported : it.value()) {
-            if (imported.plane == -1 && (usage & ~imported.usage) == 0) {
-                return imported.texture;
-            }
-        }
-    }
-    auto ret = importDmabuf(buffer->dmabufAttributes(), usage);
-    if (!ret) {
-        return nullptr;
-    }
-    const bool firstImport = it == m_importedTextures.end();
-    m_importedTextures[buffer].push_back(ImportedTexture{usage, -1, ret});
-    if (firstImport) {
-        connect(buffer, &QObject::destroyed, this, [this, buffer]() {
-            m_importedTextures.remove(buffer);
-        });
-    }
-    return ret;
+    return importBufferInternal(buffer, -1, 0, {}, usage);
 }
 
 std::shared_ptr<VulkanTexture> VulkanDevice::importBufferPlane(GraphicsBuffer *buffer, uint32_t plane, uint32_t drmFormat, const QSize &size, VkImageUsageFlags usage)
@@ -125,20 +106,25 @@ std::shared_ptr<VulkanTexture> VulkanDevice::importBufferPlane(GraphicsBuffer *b
     if (!attributes || plane >= uint32_t(attributes->planeCount) || size.isEmpty()) {
         return nullptr;
     }
+    return importBufferInternal(buffer, int(plane), drmFormat, size, usage);
+}
+
+std::shared_ptr<VulkanTexture> VulkanDevice::importBufferInternal(GraphicsBuffer *buffer, int plane, uint32_t drmFormat, const QSize &size, VkImageUsageFlags usage)
+{
     auto it = m_importedTextures.find(buffer);
     if (it != m_importedTextures.end()) {
         for (const ImportedTexture &imported : it.value()) {
-            if (imported.plane == int(plane) && (usage & ~imported.usage) == 0) {
+            if (imported.plane == plane && (usage & ~imported.usage) == 0) {
                 return imported.texture;
             }
         }
     }
-    auto texture = importDmabuf(attributes, usage, int(plane), drmFormat, size);
+    auto texture = importDmabuf(buffer->dmabufAttributes(), usage, plane, drmFormat, size);
     if (!texture) {
         return nullptr;
     }
     const bool firstImport = it == m_importedTextures.end();
-    m_importedTextures[buffer].push_back(ImportedTexture{usage, int(plane), texture});
+    m_importedTextures[buffer].push_back(ImportedTexture{usage, plane, texture});
     if (firstImport) {
         connect(buffer, &QObject::destroyed, this, [this, buffer]() {
             m_importedTextures.remove(buffer);

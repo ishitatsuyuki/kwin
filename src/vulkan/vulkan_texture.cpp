@@ -100,12 +100,14 @@ VulkanTexture::VulkanTexture(VulkanDevice *device, vk::Format format, vk::raii::
     , m_format(format)
     , m_memory(std::move(memory))
     , m_image(std::move(image))
+    , m_imageView(nullptr)
     , m_size(size)
     , m_queueRole(queueRole)
     , m_external(external)
     , m_componentMapping(componentMapping)
 {
     m_deviceLostConnection = QObject::connect(device, &VulkanDevice::deviceLost, device, [this]() {
+        m_imageView.clear();
         m_image.clear();
         m_memory.clear();
         m_device = nullptr;
@@ -128,6 +130,29 @@ QSize VulkanTexture::size() const
 const vk::raii::Image &VulkanTexture::handle() const
 {
     return m_image;
+}
+
+vk::ImageView VulkanTexture::imageView() const
+{
+    if (!m_device || !*m_image) {
+        return {};
+    }
+    if (!*m_imageView) {
+        auto [result, imageView] = m_device->logicalDevice().createImageView(vk::ImageViewCreateInfo{
+            vk::ImageViewCreateFlags{},
+            m_image,
+            vk::ImageViewType::e2D,
+            m_format,
+            m_componentMapping,
+            vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        });
+        if (result != vk::Result::eSuccess) {
+            qCWarning(KWIN_VULKAN) << "creating a Vulkan texture image view failed:" << vk::to_string(result);
+            return {};
+        }
+        m_imageView = std::move(imageView);
+    }
+    return *m_imageView;
 }
 
 vk::Format VulkanTexture::format() const

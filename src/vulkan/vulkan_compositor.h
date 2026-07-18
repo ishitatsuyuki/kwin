@@ -213,14 +213,17 @@ private:
     {
         FrameResources();
         ~FrameResources();
+        void unmapHostMemory();
 
         vk::raii::DescriptorPool descriptorPool;
         std::vector<vk::raii::DescriptorSet> descriptorSets;
         uint32_t descriptorCapacity = 0;
         vk::raii::Buffer layerBuffer;
         vk::raii::DeviceMemory layerMemory;
+        void *layerData = nullptr;
         vk::raii::Buffer hotLayerBuffer;
         vk::raii::DeviceMemory hotLayerMemory;
+        void *hotLayerData = nullptr;
         vk::raii::Buffer tileBuffer;
         vk::raii::DeviceMemory tileMemory;
         vk::raii::Buffer prefixBuffer;
@@ -229,11 +232,11 @@ private:
         vk::raii::DeviceMemory carryMemory;
         vk::raii::Buffer dirtyTileBuffer;
         vk::raii::DeviceMemory dirtyTileMemory;
+        void *dirtyTileData = nullptr;
         vk::raii::Buffer outputLutBuffer;
         vk::raii::DeviceMemory outputLutMemory;
+        void *outputLutData = nullptr;
         std::unique_ptr<ColorPipeline> outputColorPipeline;
-        vk::raii::ImageView targetImageView;
-        std::vector<vk::raii::ImageView> inputImageViews;
         FileDescriptor completionFence;
     };
 
@@ -287,7 +290,6 @@ private:
     uint32_t m_nextFrame = 0;
     std::unique_ptr<VulkanTexture> m_texture;
     std::unique_ptr<VulkanTexture> m_fallbackTexture;
-    vk::raii::ImageView m_fallbackImageView;
     QSize m_size;
     size_t m_layerCapacity = 0;
 };

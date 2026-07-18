@@ -132,6 +132,7 @@ private:
 
     void getQueues();
     void createCommandPools();
+    std::shared_ptr<VulkanTexture> importBufferInternal(GraphicsBuffer *buffer, int plane, uint32_t drmFormat, const QSize &size, VkImageUsageFlags usage);
     vk::raii::CommandBuffer createCommandBuffer(vk::raii::CommandPool &pool, std::deque<SubmittedCommand> &submissions);
     std::optional<FileDescriptor> submit(vk::raii::CommandBuffer &&buffer, FileDescriptor &&syncFd,
                                          const vk::raii::Queue &queue, std::deque<SubmittedCommand> &submissions);

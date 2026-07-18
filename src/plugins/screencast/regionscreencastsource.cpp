@@ -12,8 +12,6 @@
 #include "compositor.h"
 #include "core/output.h"
 #include "cursor.h"
-#include "opengl/eglbackend.h"
-#include "opengl/egldisplay.h"
 #include "opengl/glframebuffer.h"
 #include "opengl/gltexture.h"
 #include "scene/workspacescene.h"
@@ -28,17 +26,6 @@
 
 namespace KWin
 {
-
-static FormatModifierMap screencastFormats()
-{
-    if (const auto eglBackend = dynamic_cast<EglBackend *>(Compositor::self()->backend())) {
-        return eglBackend->openglContext()->displayObject()->nonExternalOnlySupportedDrmFormats();
-    }
-    if (const auto vulkanBackend = dynamic_cast<VulkanBackend *>(Compositor::self()->backend())) {
-        return vulkanBackend->device()->computeOutputFormats();
-    }
-    return {};
-}
 
 RegionScreenCastSource::RegionScreenCastSource(const Rect &region, qreal scale, std::optional<pid_t> pidToHide)
     : ScreenCastSource()

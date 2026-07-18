@@ -69,8 +69,20 @@ DrmVulkanLayer::~DrmVulkanLayer() = default;
 bool DrmVulkanLayer::ensureSwapchain()
 {
     const QSize size = targetRect().size();
+    const bool multiGpu = isMultiGpu();
+    const bool lowBandwidthMode = m_plane && m_plane->gpu()->forceLowBandwidthMode() && m_type == OutputLayerType::Primary;
+    const auto tradeoff = drmOutput()->colorPowerTradeoff();
+    if (m_swapchain && m_swapchain->size() == size
+        && m_swapchainTradeoff == tradeoff
+        && m_swapchainRequiredAlphaBits == m_requiredAlphaBits
+        && m_swapchainIsMultiGpu == multiGpu
+        && m_swapchainLowBandwidthMode == lowBandwidthMode
+        && (!multiGpu || (m_importSwapchain && !m_importSwapchain->needsRecreation()))) {
+        return true;
+    }
+
     FormatModifierMap formats;
-    if (isMultiGpu()) {
+    if (multiGpu) {
         if (!m_gpu->renderDevice()) {
             return false;
         }
@@ -80,20 +92,16 @@ bool DrmVulkanLayer::ensureSwapchain()
     } else {
         formats = intersectFormats(m_backend->device()->computeOutputFormats(), supportedDrmFormats());
     }
-    const QList<FormatInfo> candidates = filterAndSortFormats(formats, m_requiredAlphaBits, drmOutput()->colorPowerTradeoff());
+    const QList<FormatInfo> candidates = filterAndSortFormats(formats, m_requiredAlphaBits, tradeoff);
     if (size.isEmpty() || candidates.isEmpty()) {
         return false;
-    }
-    if (m_swapchain && m_swapchain->size() == size
-        && formats.value(m_swapchain->format()).contains(m_swapchain->modifier())
-        && (!isMultiGpu() || (m_importSwapchain && !m_importSwapchain->needsRecreation()))) {
-        return true;
     }
     m_target.reset();
     m_current.reset();
     m_currentFramebuffer.reset();
     m_importSwapchain.reset();
     m_swapchain.reset();
+    m_swapchainTradeoff.reset();
     for (const FormatInfo &candidate : candidates) {
         auto swapchain = VulkanSwapchain::create(m_backend->device(),
                                                  m_backend->drmDevice()->allocator(),
@@ -105,7 +113,7 @@ bool DrmVulkanLayer::ensureSwapchain()
             continue;
         }
         std::unique_ptr<MultiGpuSwapchain> importSwapchain;
-        if (isMultiGpu()) {
+        if (multiGpu) {
             importSwapchain = MultiGpuSwapchain::create(m_gpu->renderDevice(),
                                                         m_gpu->drmDevice(),
                                                         swapchain->format(),
@@ -118,6 +126,10 @@ bool DrmVulkanLayer::ensureSwapchain()
         }
         m_swapchain = std::move(swapchain);
         m_importSwapchain = std::move(importSwapchain);
+        m_swapchainTradeoff = tradeoff;
+        m_swapchainRequiredAlphaBits = m_requiredAlphaBits;
+        m_swapchainIsMultiGpu = multiGpu;
+        m_swapchainLowBandwidthMode = lowBandwidthMode;
         break;
     }
     m_damageJournal.clear();
@@ -135,25 +147,55 @@ std::optional<OutputLayerBeginFrameInfo> DrmVulkanLayer::doBeginFrame()
     if (!m_current) {
         return std::nullopt;
     }
-    std::optional<ColorPipeline> outputColorPipeline;
+    const bool needsShadowBuffer = drmOutput()->needsShadowBuffer();
     auto renderColor = colorDescription();
-    if (drmOutput()->needsShadowBuffer()) {
+    const std::shared_ptr<IccProfile> profile = needsShadowBuffer ? pipeline()->iccProfile() : nullptr;
+    const std::optional<Colorimetry> wireColor = needsShadowBuffer && profile
+        ? std::make_optional(drmOutput()->wireColor(drmOutput()->nextState()))
+        : std::nullopt;
+    const std::optional<TransferFunction::Type> wireTransfer = needsShadowBuffer && profile
+        ? std::make_optional(drmOutput()->wireTransfer(drmOutput()->nextState()))
+        : std::nullopt;
+    if (needsShadowBuffer) {
         renderColor = drmOutput()->blendingColor();
-        if (const auto &profile = pipeline()->iccProfile()) {
-            outputColorPipeline = ColorPipeline::createIcc(profile,
-                                                           renderColor,
-                                                           drmOutput()->wireColor(drmOutput()->nextState()),
-                                                           drmOutput()->wireTransfer(drmOutput()->nextState()),
-                                                           RenderingIntent::AbsoluteColorimetricNoAdaptation);
-        } else {
-            outputColorPipeline = ColorPipeline::create(renderColor,
-                                                        colorDescription(),
-                                                        RenderingIntent::AbsoluteColorimetricNoAdaptation);
-        }
     }
-    if (m_outputColorPipeline != outputColorPipeline) {
-        m_damageJournal.clear();
-        m_outputColorPipeline = outputColorPipeline;
+
+    const auto sameColorDescription = [](const std::shared_ptr<ColorDescription> &left, const std::shared_ptr<ColorDescription> &right) {
+        return left.get() == right.get() || (left && right && *left == *right);
+    };
+    const bool pipelineCacheHit = m_outputColorPipelineCacheValid
+        && m_outputColorPipelineNeedsShadowBuffer == needsShadowBuffer
+        && m_outputColorPipelineProfile == profile
+        && sameColorDescription(m_outputColorPipelineInput, renderColor)
+        && sameColorDescription(m_outputColorPipelineTarget, colorDescription())
+        && m_outputColorPipelineWireColor == wireColor
+        && m_outputColorPipelineWireTransfer == wireTransfer;
+    if (!pipelineCacheHit) {
+        std::optional<ColorPipeline> outputColorPipeline;
+        if (needsShadowBuffer) {
+            if (profile) {
+                outputColorPipeline = ColorPipeline::createIcc(profile,
+                                                               renderColor,
+                                                               *wireColor,
+                                                               *wireTransfer,
+                                                               RenderingIntent::AbsoluteColorimetricNoAdaptation);
+            } else {
+                outputColorPipeline = ColorPipeline::create(renderColor,
+                                                            colorDescription(),
+                                                            RenderingIntent::AbsoluteColorimetricNoAdaptation);
+            }
+        }
+        if (m_outputColorPipeline != outputColorPipeline) {
+            m_damageJournal.clear();
+            m_outputColorPipeline = std::move(outputColorPipeline);
+        }
+        m_outputColorPipelineCacheValid = true;
+        m_outputColorPipelineNeedsShadowBuffer = needsShadowBuffer;
+        m_outputColorPipelineProfile = profile;
+        m_outputColorPipelineInput = renderColor;
+        m_outputColorPipelineTarget = colorDescription();
+        m_outputColorPipelineWireColor = wireColor;
+        m_outputColorPipelineWireTransfer = wireTransfer;
     }
     m_target = std::make_unique<VulkanRenderTarget>(m_current->texture(),
                                                     m_current->releaseFd().duplicate(),
@@ -314,7 +356,14 @@ void DrmVulkanLayer::releaseBuffers()
     m_currentFramebuffer.reset();
     m_scanoutBuffer.reset();
     m_importSwapchain.reset();
+    m_swapchainTradeoff.reset();
     m_outputColorPipeline.reset();
+    m_outputColorPipelineCacheValid = false;
+    m_outputColorPipelineProfile.reset();
+    m_outputColorPipelineInput.reset();
+    m_outputColorPipelineTarget.reset();
+    m_outputColorPipelineWireColor.reset();
+    m_outputColorPipelineWireTransfer.reset();
     m_swapchain.reset();
     m_damageJournal.clear();
 }

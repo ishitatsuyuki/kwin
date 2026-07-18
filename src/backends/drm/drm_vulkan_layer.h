@@ -40,12 +40,23 @@ private:
     DrmVulkanBackend *const m_backend;
     DrmGpu *const m_gpu;
     std::unique_ptr<VulkanSwapchain> m_swapchain;
+    std::optional<BackendOutput::ColorPowerTradeoff> m_swapchainTradeoff;
+    uint32_t m_swapchainRequiredAlphaBits = 0;
+    bool m_swapchainIsMultiGpu = false;
+    bool m_swapchainLowBandwidthMode = false;
     std::shared_ptr<VulkanSwapchainSlot> m_current;
     std::shared_ptr<DrmFramebuffer> m_currentFramebuffer;
     std::shared_ptr<DrmFramebuffer> m_scanoutBuffer;
     std::unique_ptr<VulkanRenderTarget> m_target;
     std::unique_ptr<MultiGpuSwapchain> m_importSwapchain;
     std::optional<ColorPipeline> m_outputColorPipeline;
+    bool m_outputColorPipelineCacheValid = false;
+    bool m_outputColorPipelineNeedsShadowBuffer = false;
+    std::shared_ptr<IccProfile> m_outputColorPipelineProfile;
+    std::shared_ptr<ColorDescription> m_outputColorPipelineInput;
+    std::shared_ptr<ColorDescription> m_outputColorPipelineTarget;
+    std::optional<Colorimetry> m_outputColorPipelineWireColor;
+    std::optional<TransferFunction::Type> m_outputColorPipelineWireTransfer;
     DamageJournal m_damageJournal;
 };
 

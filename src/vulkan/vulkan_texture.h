@@ -55,6 +55,7 @@ public:
     QImage download() const;
 
     const vk::raii::Image &handle() const;
+    vk::ImageView imageView() const;
     vk::Format format() const;
     QSize size() const;
     VulkanQueueRole queueRole() const;
@@ -70,6 +71,7 @@ private:
     vk::Format m_format;
     std::vector<vk::raii::DeviceMemory> m_memory;
     vk::raii::Image m_image;
+    mutable vk::raii::ImageView m_imageView;
     QSize m_size;
     VulkanQueueRole m_queueRole;
     bool m_external;

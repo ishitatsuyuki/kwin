@@ -6,12 +6,15 @@
 
 #pragma once
 
+#include "core/drm_formats.h"
 #include "opengl/glplatform.h"
 #include "opengl/gltexture.h"
 #include "opengl/glutils.h"
 
 namespace KWin
 {
+
+FormatModifierMap screencastFormats();
 
 // in-place vertical mirroring
 static void mirrorVertically(uchar *data, int height, int stride)

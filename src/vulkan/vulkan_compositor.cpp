@@ -266,22 +266,6 @@ std::array<float, 4> matrixRow(const QMatrix4x4 &matrix, int row)
     return {matrix(row, 0), matrix(row, 1), matrix(row, 2), matrix(row, 3)};
 }
 
-std::optional<vk::raii::ImageView> createImageView(const vk::raii::Device &device, const VulkanTexture *texture)
-{
-    auto [result, imageView] = device.createImageView(vk::ImageViewCreateInfo{
-        vk::ImageViewCreateFlags{},
-        texture->handle(),
-        vk::ImageViewType::e2D,
-        texture->format(),
-        texture->componentMapping(),
-        vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-    });
-    if (result != vk::Result::eSuccess) {
-        return std::nullopt;
-    }
-    return std::move(imageView);
-}
-
 } // namespace
 
 VulkanCompositor::FrameResources::FrameResources()
@@ -300,11 +284,30 @@ VulkanCompositor::FrameResources::FrameResources()
     , dirtyTileMemory(nullptr)
     , outputLutBuffer(nullptr)
     , outputLutMemory(nullptr)
-    , targetImageView(nullptr)
 {
 }
 
 VulkanCompositor::FrameResources::~FrameResources() = default;
+
+void VulkanCompositor::FrameResources::unmapHostMemory()
+{
+    if (layerData) {
+        layerMemory.unmapMemory();
+        layerData = nullptr;
+    }
+    if (hotLayerData) {
+        hotLayerMemory.unmapMemory();
+        hotLayerData = nullptr;
+    }
+    if (dirtyTileData) {
+        dirtyTileMemory.unmapMemory();
+        dirtyTileData = nullptr;
+    }
+    if (outputLutData) {
+        outputLutMemory.unmapMemory();
+        outputLutData = nullptr;
+    }
+}
 
 VulkanCompositor::VulkanCompositor(VulkanDevice *device)
     : m_device(device)
@@ -319,7 +322,6 @@ VulkanCompositor::VulkanCompositor(VulkanDevice *device)
     , m_simpleCompositePipeline(nullptr)
     , m_shallowCompositePipeline(nullptr)
     , m_sampler(nullptr)
-    , m_fallbackImageView(nullptr)
 {
     connect(device, &VulkanDevice::deviceLost, this, [this]() {
         releaseResources();
@@ -413,11 +415,9 @@ bool VulkanCompositor::initialize()
     if (!m_fallbackTexture) {
         return false;
     }
-    auto fallbackImageView = createImageView(device, m_fallbackTexture.get());
-    if (!fallbackImageView) {
+    if (!m_fallbackTexture->imageView()) {
         return false;
     }
-    m_fallbackImageView = std::move(*fallbackImageView);
 
     return createPipelines();
 }
@@ -514,8 +514,6 @@ bool VulkanCompositor::ensureTarget(const QSize &size)
 
     m_device->waitComputeIdle();
     for (FrameResources &frame : m_frames) {
-        frame.targetImageView.clear();
-        frame.inputImageViews.clear();
         frame.completionFence = FileDescriptor{};
     }
     m_texture.reset();
@@ -546,8 +544,7 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
     const size_t layerCapacity = std::bit_ceil(requiredCapacity);
     m_device->waitComputeIdle();
     for (FrameResources &frame : m_frames) {
-        frame.targetImageView.clear();
-        frame.inputImageViews.clear();
+        frame.unmapHostMemory();
         frame.layerBuffer.clear();
         frame.layerMemory.clear();
         frame.hotLayerBuffer.clear();
@@ -635,6 +632,11 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
         if (frame.layerBuffer.bindMemory(frame.layerMemory, 0) != vk::Result::eSuccess) {
             return false;
         }
+        auto [layerMapResult, layerData] = frame.layerMemory.mapMemory(0, VK_WHOLE_SIZE);
+        if (layerMapResult != vk::Result::eSuccess) {
+            return false;
+        }
+        frame.layerData = layerData;
 
         frame.hotLayerMemory = m_device->allocateMemory(hotLayerBufferInfo,
                                                         vk::MemoryPropertyFlagBits::eDeviceLocal
@@ -656,6 +658,11 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
         if (frame.hotLayerBuffer.bindMemory(frame.hotLayerMemory, 0) != vk::Result::eSuccess) {
             return false;
         }
+        auto [hotLayerMapResult, hotLayerData] = frame.hotLayerMemory.mapMemory(0, VK_WHOLE_SIZE);
+        if (hotLayerMapResult != vk::Result::eSuccess) {
+            return false;
+        }
+        frame.hotLayerData = hotLayerData;
 
         frame.tileMemory = m_device->allocateMemory(tileBufferInfo, vk::MemoryPropertyFlagBits::eDeviceLocal);
         if (!*frame.tileMemory) {
@@ -708,6 +715,11 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
         if (frame.dirtyTileBuffer.bindMemory(frame.dirtyTileMemory, 0) != vk::Result::eSuccess) {
             return false;
         }
+        auto [dirtyTileMapResult, dirtyTileData] = frame.dirtyTileMemory.mapMemory(0, VK_WHOLE_SIZE);
+        if (dirtyTileMapResult != vk::Result::eSuccess) {
+            return false;
+        }
+        frame.dirtyTileData = dirtyTileData;
 
         frame.outputLutMemory = m_device->allocateMemory(outputLutBufferInfo, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
         if (!*frame.outputLutMemory) {
@@ -721,6 +733,11 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
         if (frame.outputLutBuffer.bindMemory(frame.outputLutMemory, 0) != vk::Result::eSuccess) {
             return false;
         }
+        auto [outputLutMapResult, outputLutData] = frame.outputLutMemory.mapMemory(0, VK_WHOLE_SIZE);
+        if (outputLutMapResult != vk::Result::eSuccess) {
+            return false;
+        }
+        frame.outputLutData = outputLutData;
     }
     m_size = size;
     m_layerCapacity = layerCapacity;
@@ -823,13 +840,11 @@ bool VulkanCompositor::updateTargetDescriptor(VulkanTexture *target, uint32_t ba
     if (!m_currentFrame || batchCount > m_currentFrame->descriptorSets.size()) {
         return false;
     }
-    m_currentFrame->targetImageView.clear();
-    auto imageView = createImageView(m_device->logicalDevice(), target);
+    const vk::ImageView imageView = target->imageView();
     if (!imageView) {
         return false;
     }
-    m_currentFrame->targetImageView = std::move(*imageView);
-    const vk::DescriptorImageInfo imageInfo{nullptr, *m_currentFrame->targetImageView, vk::ImageLayout::eGeneral};
+    const vk::DescriptorImageInfo imageInfo{nullptr, imageView, vk::ImageLayout::eGeneral};
     for (uint32_t i = 0; i < batchCount; ++i) {
         m_device->logicalDevice().updateDescriptorSets(vk::WriteDescriptorSet{
                                                            *m_currentFrame->descriptorSets[i],
@@ -862,8 +877,8 @@ bool VulkanCompositor::updateTextureDescriptors(std::span<const TextureBatch> ba
             }
         }
     }
-    m_currentFrame->inputImageViews.clear();
-    m_currentFrame->inputImageViews.reserve(textures.size());
+    std::vector<vk::ImageView> imageViews;
+    imageViews.reserve(textures.size());
     acquireBarriers.clear();
     acquireBarriers.reserve(textures.size());
     releaseBarriers.clear();
@@ -878,11 +893,11 @@ bool VulkanCompositor::updateTextureDescriptors(std::span<const TextureBatch> ba
             qCWarning(KWIN_VULKAN) << "A texture without compute-queue ownership was passed to the Vulkan compositor";
             return false;
         }
-        auto view = createImageView(m_device->logicalDevice(), texture);
+        const vk::ImageView view = texture->imageView();
         if (!view) {
             return false;
         }
-        m_currentFrame->inputImageViews.push_back(std::move(*view));
+        imageViews.push_back(view);
         const bool external = texture->isExternal();
         acquireBarriers.emplace_back(external ? vk::PipelineStageFlagBits2::eNone : vk::PipelineStageFlagBits2::eAllCommands,
                                      external ? vk::AccessFlags2{} : vk::AccessFlags2(vk::AccessFlagBits2::eMemoryWrite),
@@ -912,13 +927,13 @@ bool VulkanCompositor::updateTextureDescriptors(std::span<const TextureBatch> ba
         std::array<vk::DescriptorImageInfo, MaximumTextureCount> imageInfos;
         const TextureBatch &batch = batches[batchIndex];
         for (uint32_t i = 0; i < MaximumTextureCount; ++i) {
-            vk::ImageView view = *m_fallbackImageView;
+            vk::ImageView view = m_fallbackTexture->imageView();
             if (i < batch.textures.size()) {
                 const auto textureIt = std::ranges::find(textures, batch.textures[i]);
                 if (textureIt == textures.end()) {
                     return false;
                 }
-                view = *m_currentFrame->inputImageViews[std::distance(textures.begin(), textureIt)];
+                view = imageViews[std::distance(textures.begin(), textureIt)];
             }
             imageInfos[i] = vk::DescriptorImageInfo{*m_sampler, view, vk::ImageLayout::eGeneral};
         }
@@ -945,12 +960,7 @@ bool VulkanCompositor::updateOutputLut(const ColorPipeline &pipeline)
         return true;
     }
 
-    const vk::DeviceSize byteSize = vk::DeviceSize(OutputLutEntryCount) * sizeof(std::array<float, 4>);
-    auto [mapResult, mapped] = m_currentFrame->outputLutMemory.mapMemory(0, byteSize);
-    if (mapResult != vk::Result::eSuccess) {
-        return false;
-    }
-    auto entries = std::span(static_cast<std::array<float, 4> *>(mapped), OutputLutEntryCount);
+    auto entries = std::span(static_cast<std::array<float, 4> *>(m_currentFrame->outputLutData), OutputLutEntryCount);
     const float minimum = pipeline.inputRange.min;
     const float range = pipeline.inputRange.max - pipeline.inputRange.min;
     for (uint32_t blue = 0; blue < OutputLutEdgeSize; ++blue) {
@@ -966,7 +976,6 @@ bool VulkanCompositor::updateOutputLut(const ColorPipeline &pipeline)
             }
         }
     }
-    m_currentFrame->outputLutMemory.unmapMemory();
     m_currentFrame->outputColorPipeline = std::make_unique<ColorPipeline>(pipeline);
     return true;
 }
@@ -1415,20 +1424,10 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
     });
     if (!layers.empty()) {
         if (!useSimpleCompositePipeline) {
-            auto [mapResult, data] = m_currentFrame->layerMemory.mapMemory(0, sizeof(GpuLayer) * layers.size());
-            if (mapResult != vk::Result::eSuccess) {
-                return std::nullopt;
-            }
-            std::memcpy(data, gpuLayers.data(), sizeof(GpuLayer) * layers.size());
-            m_currentFrame->layerMemory.unmapMemory();
+            std::memcpy(m_currentFrame->layerData, gpuLayers.data(), sizeof(GpuLayer) * layers.size());
         }
 
-        auto [hotMapResult, hotData] = m_currentFrame->hotLayerMemory.mapMemory(0, sizeof(GpuHotLayer) * layers.size());
-        if (hotMapResult != vk::Result::eSuccess) {
-            return std::nullopt;
-        }
-        std::memcpy(hotData, gpuHotLayers.data(), sizeof(GpuHotLayer) * layers.size());
-        m_currentFrame->hotLayerMemory.unmapMemory();
+        std::memcpy(m_currentFrame->hotLayerData, gpuHotLayers.data(), sizeof(GpuHotLayer) * layers.size());
     }
 
     const uint32_t tilesWide = (size.width() + TileSize - 1) / TileSize;
@@ -1469,12 +1468,7 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
     }
     const uint32_t compositeGroupCountY = uint32_t(compositeGroupCountY64);
     if (!dirtyTiles.empty()) {
-        auto [mapResult, data] = m_currentFrame->dirtyTileMemory.mapMemory(0, sizeof(uint32_t) * dirtyTiles.size());
-        if (mapResult != vk::Result::eSuccess) {
-            return std::nullopt;
-        }
-        std::memcpy(data, dirtyTiles.data(), sizeof(uint32_t) * dirtyTiles.size());
-        m_currentFrame->dirtyTileMemory.unmapMemory();
+        std::memcpy(m_currentFrame->dirtyTileData, dirtyTiles.data(), sizeof(uint32_t) * dirtyTiles.size());
     }
     PushConstants pushConstants{
         .layerCount = uint32_t(layers.size()),
@@ -1751,8 +1745,7 @@ void VulkanCompositor::releaseResources()
     m_currentFrame = nullptr;
     for (FrameResources &frame : m_frames) {
         frame.completionFence = FileDescriptor{};
-        frame.inputImageViews.clear();
-        frame.targetImageView.clear();
+        frame.unmapHostMemory();
         frame.tileBuffer.clear();
         frame.tileMemory.clear();
         frame.prefixBuffer.clear();
@@ -1772,7 +1765,6 @@ void VulkanCompositor::releaseResources()
         frame.descriptorPool.clear();
         frame.descriptorCapacity = 0;
     }
-    m_fallbackImageView.clear();
     m_fallbackTexture.reset();
     m_texture.reset();
     m_sampler.clear();

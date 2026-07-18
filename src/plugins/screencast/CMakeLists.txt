@@ -10,6 +10,7 @@ target_sources(screencast PRIVATE
     screencastmanager.cpp
     screencastsource.cpp
     screencaststream.cpp
+    screencastutils.cpp
     windowscreencastsource.cpp
 )
 
