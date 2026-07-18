@@ -382,6 +382,43 @@ void VulkanCompositorIntegrationTest::testWindowThumbnail()
                 && closeTo(outputFrame.pixelColor(396, 388), updatedBottomColor);
         })(),
                                  5000);
+
+        // Window thumbnails must remain renderable while their source window
+        // is minimized. The root WindowItem is hidden in the workspace scene,
+        // but it is the explicitly requested root of this offscreen render.
+        window->setMinimized(true);
+        QVERIFY(window->isMinimized());
+
+        const QColor minimizedTopColor(137, 61, 211);
+        const QColor minimizedBottomColor(18, 173, 196);
+        sourceImage.fill(minimizedTopColor);
+        QPainter minimizedPainter(&sourceImage);
+        minimizedPainter.fillRect(QRect(0, 32, 96, 32), minimizedBottomColor);
+        minimizedPainter.end();
+        damagedSpy.clear();
+        Test::render(surface.get(), sourceImage);
+        QTRY_VERIFY_WITH_TIMEOUT(damagedSpy.count() > 0, 5000);
+
+        Q_EMIT kwinApp()->scene()->preFrameRender();
+        thumbnailScene.update(nullptr);
+        kwinApp()->scene()->addRepaintFull();
+        QTRY_VERIFY_WITH_TIMEOUT(([&]() {
+            if (!layer->texture()) {
+                return false;
+            }
+            outputFrame = layer->texture()->download();
+            if (outputFrame.isNull()) {
+                return false;
+            }
+            const auto closeTo = [](const QColor &actual, const QColor &expected) {
+                return std::abs(actual.red() - expected.red()) <= 2
+                    && std::abs(actual.green() - expected.green()) <= 2
+                    && std::abs(actual.blue() - expected.blue()) <= 2;
+            };
+            return closeTo(outputFrame.pixelColor(396, 300), minimizedTopColor)
+                && closeTo(outputFrame.pixelColor(396, 388), minimizedBottomColor);
+        })(),
+                                 5000);
     }
     Test::destroyWaylandConnection();
 }

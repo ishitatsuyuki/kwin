@@ -168,7 +168,8 @@ private:
                      const QRectF &clipRect,
                      const std::optional<RoundedClip> &roundedClip,
                      const std::function<bool(Item *)> &filter,
-                     const std::function<bool(Item *)> &holeFilter);
+                     const std::function<bool(Item *)> &holeFilter,
+                     bool isRoot);
     void collectSurface(SurfaceItem *item,
                         const QTransform &transform,
                         qreal opacity,

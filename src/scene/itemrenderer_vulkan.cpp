@@ -373,7 +373,8 @@ void ItemRendererVulkan::renderItem(const RenderTarget &renderTarget,
                 QRectF(static_cast<QRect>(targetClip.boundingRect())),
                 std::nullopt,
                 filter,
-                holeFilter);
+                holeFilter,
+                true);
 }
 
 void ItemRendererVulkan::setLayerDebugging(bool enable)
@@ -827,7 +828,8 @@ void ItemRendererVulkan::collectItem(Item *item,
                                      const QRectF &clipRect,
                                      const std::optional<RoundedClip> &parentRoundedClip,
                                      const std::function<bool(Item *)> &filter,
-                                     const std::function<bool(Item *)> &holeFilter)
+                                     const std::function<bool(Item *)> &holeFilter,
+                                     bool isRoot)
 {
     bool hole = false;
     if (filter && filter(item)) {
@@ -836,7 +838,11 @@ void ItemRendererVulkan::collectItem(Item *item,
         }
         hole = true;
     }
-    if (!item->explicitVisible()) {
+    // renderItem() explicitly requests its root item, so match the OpenGL and
+    // QPainter renderers by rendering that root even if it is hidden from the
+    // workspace scene. This is required for offscreen rendering of minimized
+    // windows. Descendants still honor their explicit visibility.
+    if (!isRoot && !item->explicitVisible()) {
         return;
     }
 
@@ -852,7 +858,7 @@ void ItemRendererVulkan::collectItem(Item *item,
         if (child->z() >= 0) {
             break;
         }
-        collectItem(child, transform, opacity, brightness, saturation, clipRect, parentRoundedClip, filter, holeFilter);
+        collectItem(child, transform, opacity, brightness, saturation, clipRect, parentRoundedClip, filter, holeFilter, false);
     }
 
     std::optional<RoundedClip> roundedClip;
@@ -916,7 +922,7 @@ void ItemRendererVulkan::collectItem(Item *item,
         if (child->z() < 0) {
             continue;
         }
-        collectItem(child, transform, opacity, brightness, saturation, clipRect, roundedClip, filter, holeFilter);
+        collectItem(child, transform, opacity, brightness, saturation, clipRect, roundedClip, filter, holeFilter, false);
     }
 }
 

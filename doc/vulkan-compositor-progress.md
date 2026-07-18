@@ -384,6 +384,22 @@ regression renders a directly positioned root item with simultaneous scale and
 translation at 1.25x output scale and compares Vulkan with both an explicit
 reference and the OpenGL renderer.
 
+## Resolved bug: minimized window thumbnails were transparent
+
+Observed on 2026-07-18 as window previews becoming blank after their source
+window was minimized. Minimization hides the root `WindowItem` from the normal
+workspace scene, but `WindowThumbnailSource` explicitly renders that root into
+an offscreen target. The OpenGL and QPainter item renderers intentionally render
+the requested root regardless of its workspace visibility and apply visibility
+checks only to descendants. The Vulkan traversal instead rejected the invisible
+root, leaving the freshly cleared thumbnail target transparent.
+
+The Vulkan renderer now bypasses explicit visibility only for the root passed to
+`renderItem()` while continuing to exclude invisible descendants. The native
+Vulkan-to-Qt Quick thumbnail regression minimizes its source window, damages it,
+and verifies that the updated two-color contents remain visible under Vulkan
+validation.
+
 ## Resolved bug: opaque blurred surfaces exposed stale backdrops while fading
 
 Observed on 2026-07-18 as purple or wallpaper-colored panel and logout-screen
