@@ -90,13 +90,18 @@ bool WaylandExplicitSync::setAcquireReleasePoints(GraphicsBuffer *buffer, FileDe
         return false;
     }
 
-    if (!m_surfaceSync) {
-        m_surfaceSync = wp_linux_drm_syncobj_manager_v1_get_surface(manager, m_surface);
-    }
     auto protocolTimeline = wp_linux_drm_syncobj_manager_v1_import_timeline(manager, timelineFd.get());
     if (!protocolTimeline) {
         qCWarning(KWIN_WAYLAND_BACKEND) << "Failed to import a host explicit-sync timeline";
         return false;
+    }
+    if (!m_surfaceSync) {
+        m_surfaceSync = wp_linux_drm_syncobj_manager_v1_get_surface(manager, m_surface);
+        if (!m_surfaceSync) {
+            wp_linux_drm_syncobj_timeline_v1_destroy(protocolTimeline);
+            qCWarning(KWIN_WAYLAND_BACKEND) << "Failed to create host explicit synchronization for a surface";
+            return false;
+        }
     }
 
     if (acquireFence.isValid()) {
@@ -112,6 +117,11 @@ bool WaylandExplicitSync::setAcquireReleasePoints(GraphicsBuffer *buffer, FileDe
 
     new ReleaseNotifier(m_backend, buffer, std::move(releaseEvent), std::move(timeline));
     return true;
+}
+
+bool WaylandExplicitSync::isActive() const
+{
+    return m_surfaceSync;
 }
 
 } // namespace KWin::Wayland

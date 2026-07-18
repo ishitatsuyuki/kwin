@@ -9,6 +9,7 @@
 #pragma once
 
 #include "core/backendoutput.h"
+#include "core/graphicsbuffer.h"
 #include "utils/filedescriptor.h"
 
 #include <KWayland/Client/xdgshell.h>
@@ -68,15 +69,15 @@ public:
     KWayland::Client::Pointer *pointer() const;
     void setPointer(KWayland::Client::Pointer *pointer);
 
-    void setEnabled(bool enable);
-    void update(wl_buffer *buffer,
+    bool setEnabled(bool enable);
+    bool update(wl_buffer *buffer,
                 const QSize &logicalSize,
                 const QPoint &hotspot,
                 GraphicsBuffer *graphicsBuffer = nullptr,
                 FileDescriptor &&acquireFence = {});
 
 private:
-    void sync();
+    bool sync();
 
     KWayland::Client::Pointer *m_pointer = nullptr;
     std::unique_ptr<KWayland::Client::Surface> m_surface;
@@ -85,7 +86,7 @@ private:
     QPoint m_hotspot;
     QSize m_size;
     bool m_enabled = true;
-    GraphicsBuffer *m_graphicsBuffer = nullptr;
+    GraphicsBufferRef m_graphicsBuffer;
     FileDescriptor m_acquireFence;
     std::unique_ptr<WaylandExplicitSync> m_explicitSync;
 };

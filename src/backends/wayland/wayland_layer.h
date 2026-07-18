@@ -51,7 +51,7 @@ public:
 
     bool test() const;
     void setBuffer(GraphicsBuffer *buffer, const Region &deviceDamagedRegion, FileDescriptor &&acquireFence = {});
-    void commit(PresentationMode presentationMode);
+    bool commit(PresentationMode presentationMode);
 
     KWayland::Client::Surface *surface() const;
     KWayland::Client::SubSurface *subSurface() const;

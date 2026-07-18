@@ -205,9 +205,9 @@ bool WaylandEglCursorLayer::doEndFrame(const Region &renderedDeviceRegion, const
 
     EGLNativeFence releaseFence{m_backend->eglDisplayObject()};
     FileDescriptor releaseFd = releaseFence.takeFileDescriptor();
-    static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_buffer->buffer()->size() / m_output->scale(), (hotspot() / m_output->scale()).toPoint(), m_buffer->buffer(), releaseFd.duplicate());
+    const bool cursorUpdated = static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_buffer->buffer()->size() / m_output->scale(), (hotspot() / m_output->scale()).toPoint(), m_buffer->buffer(), releaseFd.duplicate());
     m_swapchain->release(m_buffer, std::move(releaseFd));
-    return true;
+    return cursorUpdated;
 }
 
 DrmDevice *WaylandEglCursorLayer::scanoutDevice() const

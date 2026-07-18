@@ -235,21 +235,30 @@ void ItemRendererVulkan::endFrame()
         bool uploaded = m_painterTexture && m_painterTexture->size() == m_painterOverlay.size()
             && m_uploadManager->upload(m_painterTexture.get(), m_painterOverlay, Region(0, 0, m_painterOverlay.width(), m_painterOverlay.height()));
         if (!uploaded) {
+            std::unique_ptr<VulkanTexture> replacement;
             const auto format = VulkanTexture::qImageToVulkanFormat(m_painterOverlay.format());
             if (format) {
-                m_painterTexture = VulkanTexture::allocate(m_device,
-                                                           *format,
-                                                           m_painterOverlay.size(),
-                                                           usage,
-                                                           VulkanQueueRole::Compute,
-                                                           VulkanTexture::qImageToComponentMapping(m_painterOverlay.format()));
-                uploaded = m_painterTexture
-                    && m_uploadManager->upload(m_painterTexture.get(), m_painterOverlay, Region(0, 0, m_painterOverlay.width(), m_painterOverlay.height()));
+                replacement = VulkanTexture::allocate(m_device,
+                                                      *format,
+                                                      m_painterOverlay.size(),
+                                                      usage,
+                                                      VulkanQueueRole::Compute,
+                                                      VulkanTexture::qImageToComponentMapping(m_painterOverlay.format()));
+                uploaded = replacement
+                    && m_uploadManager->upload(replacement.get(), m_painterOverlay, Region(0, 0, m_painterOverlay.width(), m_painterOverlay.height()));
             }
-        }
-        if (!uploaded) {
-            m_painterTexture = VulkanTexture::upload(m_device, m_painterOverlay, usage, VulkanQueueRole::Compute);
-            uploaded = bool(m_painterTexture);
+            if (!uploaded) {
+                replacement = VulkanTexture::upload(m_device, m_painterOverlay, usage, VulkanQueueRole::Compute);
+                uploaded = bool(replacement);
+            }
+            if (uploaded) {
+                // Descriptor image views do not own their images. The previous
+                // overlay may still be sampled by an older frame.
+                if (m_painterTexture) {
+                    m_device->waitComputeIdle();
+                }
+                m_painterTexture = std::move(replacement);
+            }
         }
         if (uploaded) {
             m_layers.push_back(VulkanCompositorLayer{
@@ -510,12 +519,21 @@ void ItemRendererVulkan::renderBackdropBlur(const QList<QRectF> &shape,
                 line[x] = uint8_t(QRandomGenerator::global()->bounded(noiseStrength));
             }
         }
-        m_blurNoiseTexture = VulkanTexture::upload(m_device,
-                                                   noise,
-                                                   vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
-                                                   VulkanQueueRole::Compute);
-        m_blurNoiseStrength = m_blurNoiseTexture ? noiseStrength : 0;
+        auto replacement = VulkanTexture::upload(m_device,
+                                                 noise,
+                                                 vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                                 VulkanQueueRole::Compute);
+        if (replacement) {
+            // Blur frame resources retain only image views. Keep the sampled
+            // image alive until all earlier compute submissions have finished.
+            if (m_blurNoiseTexture) {
+                m_device->waitComputeIdle();
+            }
+            m_blurNoiseTexture = std::move(replacement);
+            m_blurNoiseStrength = noiseStrength;
+        }
     }
+    const bool hasRequestedNoise = m_blurNoiseTexture && m_blurNoiseStrength == noiseStrength;
     m_backdropBlurs.push_back(BackdropBlur{
         .layerIndex = size_t(m_layers.size()),
         .groupEndLayerIndex = std::nullopt,
@@ -525,7 +543,7 @@ void ItemRendererVulkan::renderBackdropBlur(const QList<QRectF> &shape,
         .offset = std::max(offset, 0.0),
         .modulation = std::clamp(modulation, 0.0, 1.0),
         .noiseOpacity = std::clamp(noiseOpacity, 0.0, 1.0),
-        .noiseStrength = m_blurNoiseTexture ? noiseStrength : 0,
+        .noiseStrength = hasRequestedNoise ? noiseStrength : 0,
         .colorMatrix = colorMatrix,
         .roundedRect = roundedRect,
         .cornerRadii = cornerRadii,

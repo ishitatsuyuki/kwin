@@ -12,6 +12,7 @@
 #include "wayland_backend.h"
 #include "wayland_display.h"
 #include "wayland_explicit_sync.h"
+#include "wayland_logging.h"
 #include "wayland_output.h"
 
 #include <KWayland/Client/compositor.h>
@@ -86,14 +87,14 @@ void WaylandLayer::setBuffer(GraphicsBuffer *buffer, const Region &deviceDamaged
     m_pendingAcquireFence = std::move(acquireFence);
 }
 
-void WaylandLayer::commit(PresentationMode presentationMode)
+bool WaylandLayer::commit(PresentationMode presentationMode)
 {
     if (!isEnabled()) {
         m_pendingBuffer.reset();
         m_pendingAcquireFence = {};
         m_surface->attachBuffer((wl_buffer *)nullptr);
         m_surface->commit(KWayland::Client::Surface::CommitFlag::None);
-        return;
+        return true;
     }
     WaylandOutput *output = static_cast<WaylandOutput *>(m_output.get());
     // this is a bit annoying, we need a new Wayland protocol
@@ -109,8 +110,8 @@ void WaylandLayer::commit(PresentationMode presentationMode)
         const auto imageDescription = output->backend()->display()->colorManager()->createImageDescription(*m_color);
         wp_color_management_surface_v1_set_image_description(m_colorSurface, imageDescription, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
         wp_image_description_v1_destroy(imageDescription);
-        m_previousColor = m_color;
     }
+    m_previousColor = m_color;
     if (m_tearingControl) {
         if (presentationMode == PresentationMode::Async) {
             wp_tearing_control_v1_set_presentation_hint(m_tearingControl, WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC);
@@ -120,13 +121,23 @@ void WaylandLayer::commit(PresentationMode presentationMode)
     }
     if (m_pendingBuffer) {
         GraphicsBuffer *buffer = m_pendingBuffer.buffer();
-        m_surface->attachBuffer(output->backend()->importBuffer(buffer));
+        wl_buffer *hostBuffer = output->backend()->importBuffer(buffer);
+        if (!hostBuffer) {
+            return false;
+        }
+        const bool explicitSyncReady = m_explicitSync->setAcquireReleasePoints(buffer, m_pendingAcquireFence.duplicate());
+        if (!explicitSyncReady && m_explicitSync->isActive()) {
+            qCWarning(KWIN_WAYLAND_BACKEND) << "Deferring a surface commit without required explicit synchronization points";
+            return false;
+        }
+        m_pendingAcquireFence = {};
+        m_surface->attachBuffer(hostBuffer);
         m_surface->damageBuffer(QRegion(m_pendingDamage));
-        m_explicitSync->setAcquireReleasePoints(buffer, std::move(m_pendingAcquireFence));
         // WaylandBackend::importBuffer takes care of the buffers life time from here on
         m_pendingBuffer.reset();
     }
     m_surface->commit(KWayland::Client::Surface::CommitFlag::None);
+    return true;
 }
 
 KWayland::Client::Surface *WaylandLayer::surface() const

@@ -124,9 +124,9 @@ bool WaylandQPainterCursorLayer::doEndFrame(const Region &renderedDeviceRegion, 
     wl_buffer *buffer = static_cast<WaylandOutput *>(m_output.get())->backend()->importBuffer(m_back->buffer());
     Q_ASSERT(buffer);
 
-    static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_back->buffer()->size() / m_output->scale(), hotspot().toPoint());
+    const bool cursorUpdated = static_cast<WaylandOutput *>(m_output.get())->cursor()->update(buffer, m_back->buffer()->size() / m_output->scale(), hotspot().toPoint());
     m_swapchain->release(m_back);
-    return true;
+    return cursorUpdated;
 }
 
 DrmDevice *WaylandQPainterCursorLayer::scanoutDevice() const

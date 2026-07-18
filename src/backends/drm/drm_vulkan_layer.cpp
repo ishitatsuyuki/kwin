@@ -93,6 +93,7 @@ bool DrmVulkanLayer::ensureSwapchain()
     m_current.reset();
     m_currentFramebuffer.reset();
     m_importSwapchain.reset();
+    m_swapchain.reset();
     for (const FormatInfo &candidate : candidates) {
         auto swapchain = VulkanSwapchain::create(m_backend->device(),
                                                  m_backend->drmDevice()->allocator(),

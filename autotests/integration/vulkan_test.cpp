@@ -67,6 +67,7 @@ private Q_SLOTS:
     void testComputeQuadGeometry();
     void testComputeTransformsAndClipping();
     void testComputeDamageTiles();
+    void testComputeLargeDispatch();
     void testComputeBrightnessAndSaturation();
     void testComputeColorConversion();
     void testComputeHdrToneMapping();
@@ -871,6 +872,27 @@ void VulkanTest::testComputeDamageTiles()
     QVERIFY(noDamage);
     const QImage unchangedImage = noDamage->texture->download();
     QCOMPARE(maximumChannelDifference(unchangedImage, changedImage), 0);
+}
+
+void VulkanTest::testComputeLargeDispatch()
+{
+    // One workgroup is dispatched per dirty tile. This is just over Vulkan's
+    // guaranteed 65,535 workgroups in one dimension and therefore exercises
+    // the compositor's two-dimensional dispatch indexing.
+    const QSize size(4096, 4112);
+    const QColor color(37, 149, 211, 255);
+    const std::array layers{VulkanSolidLayer{
+        .rect = QRectF(QPointF(), QSizeF(size)),
+        .color = color,
+    }};
+    auto compositor = VulkanCompositor::create(m_device);
+    QVERIFY(compositor);
+    auto result = compositor->render(size, layers);
+    QVERIFY(result);
+    const QImage image = result->texture->download();
+    QVERIFY(!image.isNull());
+    QCOMPARE(image.pixelColor(0, 0), color);
+    QCOMPARE(image.pixelColor(size.width() - 1, size.height() - 1), color);
 }
 
 void VulkanTest::testComputeBrightnessAndSaturation()

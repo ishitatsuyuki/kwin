@@ -73,7 +73,7 @@ bool evaluateLayer(HotLayer layer, vec2 samplePosition, out vec4 source)
 
 void main()
 {
-    uint dirtyTileIndex = gl_WorkGroupID.x;
+    uint dirtyTileIndex = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
     if (dirtyTileIndex >= params.dirtyTileCount) {
         return;
     }

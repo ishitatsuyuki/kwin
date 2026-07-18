@@ -530,10 +530,12 @@ bool VulkanCompositor::ensureTarget(const QSize &size)
 
 bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
 {
-    if (size == m_size && layerCount <= m_layerCapacity
-        && *m_frames[0].layerBuffer && *m_frames[0].hotLayerBuffer
-        && *m_frames[0].tileBuffer && *m_frames[0].prefixBuffer
-        && *m_frames[0].carryBuffer && *m_frames[0].dirtyTileBuffer) {
+    const bool allFramesValid = std::ranges::all_of(m_frames, [](const FrameResources &frame) {
+        return *frame.layerBuffer && *frame.hotLayerBuffer
+            && *frame.tileBuffer && *frame.prefixBuffer && *frame.carryBuffer
+            && *frame.dirtyTileBuffer && *frame.outputLutBuffer;
+    });
+    if (size == m_size && layerCount <= m_layerCapacity && allFramesValid) {
         return true;
     }
     if (size.isEmpty() || layerCount > std::numeric_limits<uint32_t>::max()) {
@@ -563,6 +565,10 @@ bool VulkanCompositor::ensureResources(const QSize &size, size_t layerCount)
         frame.outputColorPipeline.reset();
         frame.completionFence = FileDescriptor{};
     }
+    // Do not let a partial allocation failure make the next call mistake the
+    // incomplete frame ring for resources matching the old dimensions.
+    m_size = {};
+    m_layerCapacity = 0;
 
     const uint32_t tilesWide = (size.width() + TileSize - 1) / TileSize;
     const uint32_t tilesHigh = (size.height() + TileSize - 1) / TileSize;
@@ -1450,6 +1456,18 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
             }
         }
     }
+    const vk::Extent3D maximumGroupCount = m_device->maximumComputeWorkGroupCount();
+    const uint32_t compositeGroupCountX = dirtyTiles.empty()
+        ? 0
+        : std::min<uint64_t>(dirtyTiles.size(), maximumGroupCount.width);
+    const uint64_t compositeGroupCountY64 = compositeGroupCountX == 0
+        ? 0
+        : (dirtyTiles.size() + compositeGroupCountX - 1) / compositeGroupCountX;
+    if (compositeGroupCountY64 > maximumGroupCount.height) {
+        qCWarning(KWIN_VULKAN) << "Vulkan compositor damage exceeds the device's compute dispatch limits";
+        return std::nullopt;
+    }
+    const uint32_t compositeGroupCountY = uint32_t(compositeGroupCountY64);
     if (!dirtyTiles.empty()) {
         auto [mapResult, data] = m_currentFrame->dirtyTileMemory.mapMemory(0, sizeof(uint32_t) * dirtyTiles.size());
         if (mapResult != vk::Result::eSuccess) {
@@ -1657,7 +1675,7 @@ std::optional<VulkanCompositorRenderResult> VulkanCompositor::renderTo(VulkanTex
                                          {});
         commandBuffer.pushConstants(m_pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pushConstants), &pushConstants);
         if (!dirtyTiles.empty()) {
-            commandBuffer.dispatch(dirtyTiles.size(), 1, 1);
+            commandBuffer.dispatch(compositeGroupCountX, compositeGroupCountY, 1);
         }
         if (batchIndex + 1 < batchCount) {
             const vk::ImageMemoryBarrier2 batchBarrier{

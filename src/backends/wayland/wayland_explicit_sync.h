@@ -30,9 +30,11 @@ public:
     /**
      * Sets acquire and release points for the next surface commit. Returns
      * false when explicit synchronization is unavailable, in which case the
-     * caller may continue using implicit synchronization.
+     * caller may continue using implicit synchronization only if isActive()
+     * is also false.
      */
     bool setAcquireReleasePoints(GraphicsBuffer *buffer, FileDescriptor &&acquireFence);
+    bool isActive() const;
 
 private:
     WaylandBackend *const m_backend;

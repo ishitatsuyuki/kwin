@@ -184,14 +184,14 @@ bool WaylandVulkanCursorLayer::doEndFrame(const Region &renderedDeviceRegion, co
         return false;
     }
     auto output = static_cast<WaylandOutput *>(m_output.get());
-    output->cursor()->update(buffer,
-                             m_buffer->buffer()->size() / m_output->scale(),
-                             (hotspot() / m_output->scale()).toPoint(),
-                             m_buffer->buffer(),
-                             completionFence.duplicate());
+    const bool cursorUpdated = output->cursor()->update(buffer,
+                                                        m_buffer->buffer()->size() / m_output->scale(),
+                                                        (hotspot() / m_output->scale()).toPoint(),
+                                                        m_buffer->buffer(),
+                                                        completionFence.duplicate());
     m_swapchain->releaseRendered(m_buffer.get(), std::move(completionFence));
     m_target.reset();
-    return true;
+    return cursorUpdated;
 }
 
 DrmDevice *WaylandVulkanCursorLayer::scanoutDevice() const

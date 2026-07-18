@@ -332,6 +332,38 @@ the scalable path only where it wins. `RADV_DEBUG=nocache,shaders` dumps were
 also checked; no new scratch spills appeared in the three preprocessing
 kernels.
 
+## Resolved correctness review findings (2026-07-18)
+
+An automated lifetime and failure-path review found eight issues in the Vulkan
+and nested presentation paths:
+
+- Painter-overlay resize and blur-noise strength changes could destroy an image
+  still referenced by an in-flight descriptor. Replacements are now prepared
+  without disturbing the current image, and the old image is destroyed only
+  after the compute queue is idle.
+- Composite dispatch used one X workgroup per dirty tile and could exceed the
+  guaranteed 65,535 workgroups for outputs just larger than 4096x4096. Dirty
+  tiles are now dispatched as a bounded two-dimensional grid and all composite
+  shaders linearize the X/Y workgroup coordinates. A full-damage 4096x4112
+  regression verifies the last tile under Vulkan validation.
+- A partial frame-ring allocation failure could be mistaken for a valid cached
+  allocation on retry. Cached dimensions are now invalidated before allocation,
+  and the fast path validates every buffer in every frame slot.
+- DRM swapchain recreation kept the old swapchain installed if every new format
+  candidate failed. Recreation now clears it before trying candidates, so the
+  failure propagates instead of acquiring an old-size or non-importable buffer.
+- Once a nested host surface has a linux-drm-syncobj surface, every buffer
+  commit requires acquire and release points. Output-layer and cursor commits
+  now retain their buffer and fence and defer the commit when point creation
+  fails; implicit synchronization remains the fallback only before explicit
+  synchronization has been activated.
+- The nested host cursor retained an unowned `GraphicsBuffer *` while disabled.
+  It now holds a `GraphicsBufferRef`, keeping the last cursor buffer valid across
+  cursor swapchain recreation and re-enable.
+- Nested Vulkan layers without host color management repeatedly cleared their
+  damage journals because the last color was never recorded. Layer commits now
+  record the effective sRGB color even when no color-management surface exists.
+
 ## Resolved bug: DRM presentation tests corrupted buffer age
 
 Observed on 2026-07-17 as 16x16 black regions and flickering between the current

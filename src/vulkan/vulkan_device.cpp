@@ -476,6 +476,15 @@ std::span<const VkQueueFamilyProperties> VulkanDevice::queueFamilyProperties() c
     return m_queueProperties;
 }
 
+vk::Extent3D VulkanDevice::maximumComputeWorkGroupCount() const
+{
+    return vk::Extent3D{
+        m_deviceLimits.maxComputeWorkGroupCount[0],
+        m_deviceLimits.maxComputeWorkGroupCount[1],
+        m_deviceLimits.maxComputeWorkGroupCount[2],
+    };
+}
+
 float VulkanDevice::nanosecondsPerQueryTick() const
 {
     return m_deviceLimits.timestampPeriod;

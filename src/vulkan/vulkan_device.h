@@ -73,6 +73,7 @@ public:
     bool hasHighPriorityComputeQueue() const;
     bool hasHostQueryReset() const;
     std::span<const VkQueueFamilyProperties> queueFamilyProperties() const;
+    vk::Extent3D maximumComputeWorkGroupCount() const;
     float nanosecondsPerQueryTick() const;
 
     vk::raii::CommandBuffer createCommandBuffer();

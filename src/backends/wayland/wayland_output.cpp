@@ -18,6 +18,7 @@
 #include "wayland_display.h"
 #include "wayland_explicit_sync.h"
 #include "wayland_layer.h"
+#include "wayland_logging.h"
 
 #include <KWayland/Client/compositor.h>
 #include <KWayland/Client/pointer.h>
@@ -75,15 +76,20 @@ void WaylandCursor::setPointer(KWayland::Client::Pointer *pointer)
     }
 }
 
-void WaylandCursor::setEnabled(bool enable)
+bool WaylandCursor::setEnabled(bool enable)
 {
     if (m_enabled != enable) {
+        const bool previous = m_enabled;
         m_enabled = enable;
-        sync();
+        if (!sync()) {
+            m_enabled = previous;
+            return false;
+        }
     }
+    return true;
 }
 
-void WaylandCursor::update(wl_buffer *buffer,
+bool WaylandCursor::update(wl_buffer *buffer,
                            const QSize &logicalSize,
                            const QPoint &hotspot,
                            GraphicsBuffer *graphicsBuffer,
@@ -94,25 +100,31 @@ void WaylandCursor::update(wl_buffer *buffer,
     m_hotspot = hotspot;
     m_graphicsBuffer = graphicsBuffer;
     m_acquireFence = std::move(acquireFence);
-    sync();
+    return sync();
 }
 
-void WaylandCursor::sync()
+bool WaylandCursor::sync()
 {
     if (!m_enabled) {
         m_surface->attachBuffer(KWayland::Client::Buffer::Ptr());
         m_surface->commit(KWayland::Client::Surface::CommitFlag::None);
     } else {
+        const bool explicitSyncReady = m_explicitSync->setAcquireReleasePoints(m_graphicsBuffer.buffer(), m_acquireFence.duplicate());
+        if (!explicitSyncReady && m_explicitSync->isActive()) {
+            qCWarning(KWIN_WAYLAND_BACKEND) << "Deferring a cursor commit without required explicit synchronization points";
+            return false;
+        }
+        m_acquireFence = {};
         m_viewport->setDestination(m_size);
         m_surface->attachBuffer(m_buffer);
         m_surface->damageBuffer(QRect(0, 0, INT32_MAX, INT32_MAX));
-        m_explicitSync->setAcquireReleasePoints(m_graphicsBuffer, std::move(m_acquireFence));
         m_surface->commit(KWayland::Client::Surface::CommitFlag::None);
     }
 
     if (m_pointer) {
         m_pointer->setCursor(m_surface.get(), m_hotspot);
     }
+    return true;
 }
 
 void WaylandOutput::handleFractionalScaleChanged(void *data, struct wp_fractional_scale_v1 *wp_fractional_scale_v1, uint32_t scale120)
@@ -309,7 +321,9 @@ bool WaylandOutput::present(const QList<OutputLayer *> &layersToUpdate, const st
         if (m_hasPointerLock && cursorLayers.front()->isEnabled()) {
             return false;
         }
-        m_cursor->setEnabled(cursorLayers.front()->isEnabled());
+        if (!m_cursor->setEnabled(cursorLayers.front()->isEnabled())) {
+            return false;
+        }
         // TODO also move the actual cursor image update here too...
     }
     if (!m_mapped) {
@@ -324,7 +338,9 @@ bool WaylandOutput::present(const QList<OutputLayer *> &layersToUpdate, const st
     for (OutputLayer *layer : layersToUpdate) {
         // TODO maybe also make the cursor a WaylandLayer?
         if (layer->type() != OutputLayerType::CursorOnly) {
-            static_cast<WaylandLayer *>(layer)->commit(frame->presentationMode());
+            if (!static_cast<WaylandLayer *>(layer)->commit(frame->presentationMode())) {
+                return false;
+            }
         }
     }
     if (m_backend->display()->tearingControl()) {
