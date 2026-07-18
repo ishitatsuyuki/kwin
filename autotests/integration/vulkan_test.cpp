@@ -1757,7 +1757,7 @@ void VulkanTest::testItemRendererBackdropBlur()
                                 1.0,
                                 1.0,
                                 1.0);
-    renderer->renderBackdropBlur({QRectF(8, 4, 16, 16)}, 2, 2.0, 1.0, 1.0, 4, QMatrix4x4{});
+    renderer->renderBackdropBlur({QRectF(8, 4, 16, 16)}, 2, 2.0, 1.0, 1.0, 0, QMatrix4x4{});
     const std::array foregroundVertices{
         QPointF(12, 8),
         QPointF(16, 8),
@@ -1794,6 +1794,99 @@ void VulkanTest::testItemRendererBackdropBlur()
     QVERIFY(blurred.red() > 50 && blurred.red() < 210);
     QVERIFY(blurred.blue() > 50 && blurred.blue() < 210);
     QCOMPARE(blurred.alpha(), 255);
+
+    // Repaint only one compositor tile without changing the scene. The blur
+    // kernel samples beyond that tile, so this produces the same pixels only
+    // if the undamaged pre-blur backdrop remains available from the first
+    // frame.
+    const QImage expectedAfterPartialRepaint = actual;
+    const Region partialDamage(0, 0, 16, 16);
+    renderer->beginFrame(target, viewport);
+    renderer->renderBackground(target, viewport, partialDamage);
+    renderer->renderTextureQuad(backgroundTexture.get(),
+                                fullVertices,
+                                textureCoordinates,
+                                QRectF(0, 0, 16, 16),
+                                1.0,
+                                1.0,
+                                1.0);
+    renderer->renderBackdropBlur({QRectF(8, 4, 8, 12)}, 2, 2.0, 1.0, 1.0, 0, QMatrix4x4{});
+    renderer->renderTextureQuad(foregroundTexture.get(),
+                                foregroundVertices,
+                                textureCoordinates,
+                                QRectF(0, 0, 16, 16),
+                                1.0,
+                                1.0,
+                                1.0);
+    renderer->endFrame();
+
+    const int partialDifference = maximumChannelDifference(actual, expectedAfterPartialRepaint);
+    QVERIFY2(partialDifference <= 1,
+             qPrintable(QStringLiteral("maximum cached-blur partial-repaint channel difference was %1").arg(partialDifference)));
+
+    // A damaged part of the backdrop must replace the corresponding cached
+    // pixels. Compare a blurred pixel well inside the repaired tile with a
+    // fresh full render of the changed scene.
+    QImage changedBackground = background;
+    QPainter changedBackgroundPainter(&changedBackground);
+    changedBackgroundPainter.fillRect(QRect(0, 0, 16, 16), QColor(245, 210, 25));
+    changedBackgroundPainter.end();
+    auto changedBackgroundTexture = VulkanTexture::upload(m_device,
+                                                          changedBackground,
+                                                          vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                                          VulkanQueueRole::Compute);
+    QVERIFY(changedBackgroundTexture);
+
+    renderer->beginFrame(target, viewport);
+    renderer->renderBackground(target, viewport, partialDamage);
+    renderer->renderTextureQuad(changedBackgroundTexture.get(),
+                                fullVertices,
+                                textureCoordinates,
+                                QRectF(0, 0, 16, 16),
+                                1.0,
+                                1.0,
+                                1.0);
+    renderer->renderBackdropBlur({QRectF(8, 4, 8, 12)}, 2, 2.0, 1.0, 1.0, 0, QMatrix4x4{});
+    renderer->renderTextureQuad(foregroundTexture.get(),
+                                foregroundVertices,
+                                textureCoordinates,
+                                QRectF(0, 0, 16, 16),
+                                1.0,
+                                1.0,
+                                1.0);
+    renderer->endFrame();
+
+    QImage changedReference(outputSize, QImage::Format_RGBA8888_Premultiplied);
+    changedReference.fill(Qt::transparent);
+    const RenderTarget changedReferenceTarget(&changedReference);
+    const RenderViewport changedReferenceViewport(RectF(QPointF(), QSizeF(outputSize)), 1.0, changedReferenceTarget, QPoint());
+    auto referenceRenderer = std::make_unique<ItemRendererVulkan>(m_device);
+    QVERIFY(referenceRenderer->isValid());
+    referenceRenderer->beginFrame(changedReferenceTarget, changedReferenceViewport);
+    referenceRenderer->renderBackground(changedReferenceTarget, changedReferenceViewport, Region(0, 0, outputSize.width(), outputSize.height()));
+    referenceRenderer->renderTextureQuad(changedBackgroundTexture.get(),
+                                         fullVertices,
+                                         textureCoordinates,
+                                         QRectF(QPointF(), QSizeF(outputSize)),
+                                         1.0,
+                                         1.0,
+                                         1.0);
+    referenceRenderer->renderBackdropBlur({QRectF(8, 4, 16, 16)}, 2, 2.0, 1.0, 1.0, 0, QMatrix4x4{});
+    referenceRenderer->renderTextureQuad(foregroundTexture.get(),
+                                         foregroundVertices,
+                                         textureCoordinates,
+                                         QRectF(QPointF(), QSizeF(outputSize)),
+                                         1.0,
+                                         1.0,
+                                         1.0);
+    referenceRenderer->endFrame();
+
+    const QColor cachedChangedPixel = actual.pixelColor(9, 6);
+    const QColor referenceChangedPixel = changedReference.pixelColor(9, 6);
+    QVERIFY(std::abs(cachedChangedPixel.red() - referenceChangedPixel.red()) <= 1);
+    QVERIFY(std::abs(cachedChangedPixel.green() - referenceChangedPixel.green()) <= 1);
+    QVERIFY(std::abs(cachedChangedPixel.blue() - referenceChangedPixel.blue()) <= 1);
+    QVERIFY(cachedChangedPixel != expectedAfterPartialRepaint.pixelColor(9, 6));
 }
 
 void VulkanTest::testItemRendererNestedTarget()

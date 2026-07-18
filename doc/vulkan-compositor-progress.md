@@ -36,7 +36,7 @@ test unless the item explicitly says otherwise.
 - [x] Effect offscreens and render-target nesting
 - [x] Cross-fade snapshots
 - [x] Built-in offscreen color filters (Invert, Color Blindness Correction, and System Bell color/invert)
-- [x] Backdrop blur (ordered dual-Kawase passes, region and rounded-window clipping, opacity/saturation matrix, additive noise, and triple-buffered scratch resources)
+- [x] Backdrop blur (ordered dual-Kawase passes, region and rounded-window clipping, opacity/saturation matrix, additive noise, damage-updated per-view pre-blur caching, and triple-buffered scratch resources)
 - [x] Arbitrary legacy effect fragment shaders through a fenced EGL/dma-buf compatibility bridge (see below)
 - [x] Layer-bound debug overlay used by the Show Compositing effect
 - [x] Fractional-coordinate debug visualizer (`KWIN_SCENE_VISUALIZE=fractional`; red texture-sampling and blue transformed-vertex overlays, shader- and renderer-tested)
@@ -561,6 +561,27 @@ reduces query-pool creation from 20 pools to 2 per rendered frame. The Vulkan
 regression suite covers both timing-enabled waits and timing-disabled results,
 and the validation-enabled backdrop-blur regression covers the intermediate
 submission and scratch-resource lifetimes.
+
+## Vulkan pre-blur backdrop caching
+
+The first ordered backdrop blur previously recomposed its complete pre-blur
+scene into a fresh full-output scratch image on every frame, even when output
+damage covered only a few compositor tiles. The renderer now retains one
+high-precision pre-blur scene per render view and updates only the collected
+target-space damage after initialization. Cache identity follows the render
+view, and target-size or color-description changes allocate a fresh image;
+replacement waits only when the old image can still be referenced by an
+in-flight descriptor. Later stacked backdrop blurs keep the existing ordered
+scratch path because their inputs include earlier blurred windows and layers.
+
+The Vulkan renderer regression first renders a complete blur scene, repaints a
+single 16x16 tile without changing it, and verifies that blur samples outside
+the repaint still come from the preserved backdrop. It then changes that tile
+and compares an interior blurred pixel with a fresh full render, covering
+damage-driven cache replacement under Vulkan validation. This removes the
+steady-state full-target scene-capture work for the common first blur; the
+downsample, upsample, blur-combination, and final-output passes are still
+recomputed, so no end-to-end GPU-time conclusion is recorded yet.
 
 ## Resolved performance issue: steady-state Vulkan resource churn
 

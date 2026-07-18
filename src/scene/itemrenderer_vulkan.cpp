@@ -207,6 +207,11 @@ void ItemRendererVulkan::beginFrame(const RenderTarget &renderTarget, const Rend
     m_layers.clear();
     m_backdropBlurs.clear();
     m_activeBackdropBlurGroup.reset();
+    m_usedBackdropCaches.clear();
+    std::erase_if(m_backdropCaches, [](const std::unique_ptr<BackdropCache> &cache) {
+        return cache->hasView && cache->view.isNull()
+            && (!cache->completionFence.isValid() || cache->completionFence.isReadable());
+    });
     m_imageTarget = renderTarget.image();
     m_vulkanTarget = renderTarget.vulkanTarget();
     m_targetSize = renderTarget.size();
@@ -303,6 +308,7 @@ void ItemRendererVulkan::endFrame()
         m_releasePoints.clear();
         return;
     }
+    markBackdropCachesSubmitted(result->completionFence);
     if (blurFrame) {
         blurFrame->completionFence = result->completionFence.duplicate();
     }
@@ -482,6 +488,7 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderCurrentLay
         auto result = renderFrameWithBackdropBlur(*frame, compositor, target, colorDescription);
         if (result) {
             frame->completionFence = result->completionFence.duplicate();
+            markBackdropCachesSubmitted(result->completionFence);
         }
         return result;
     }
@@ -506,7 +513,8 @@ void ItemRendererVulkan::renderBackdropBlur(const QList<QRectF> &shape,
                                             const QVector4D &cornerRadii,
                                             qreal groupOpacity,
                                             Item *groupRoot,
-                                            SurfaceItem *groupSurface)
+                                            SurfaceItem *groupSurface,
+                                            RenderView *cacheView)
 {
     if (shape.isEmpty() || m_targetSize.isEmpty()) {
         return;
@@ -547,6 +555,7 @@ void ItemRendererVulkan::renderBackdropBlur(const QList<QRectF> &shape,
         .colorMatrix = colorMatrix,
         .roundedRect = roundedRect,
         .cornerRadii = cornerRadii,
+        .cacheView = cacheView,
     });
     if (groupRoot) {
         m_activeBackdropBlurGroup = ActiveBackdropBlurGroup{
@@ -605,17 +614,9 @@ bool ItemRendererVulkan::ensureBlurFrameResources(BlurFrameResources &frame, uin
 
     frame = BlurFrameResources{};
     frame.size = m_targetSize;
-    const auto usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled;
-    const auto allocateIntermediate = [this, usage](const QSize &size) {
-        auto texture = VulkanTexture::allocate(m_device, vk::Format::eR16G16B16A16Sfloat, size, usage, VulkanQueueRole::Compute);
-        if (!texture) {
-            texture = VulkanTexture::allocate(m_device, vk::Format::eR8G8B8A8Unorm, size, usage, VulkanQueueRole::Compute);
-        }
-        return texture;
-    };
-    frame.sceneA = allocateIntermediate(m_targetSize);
-    frame.sceneB = allocateIntermediate(m_targetSize);
-    frame.sceneC = allocateIntermediate(m_targetSize);
+    frame.sceneA = allocateBlurIntermediate(m_targetSize);
+    frame.sceneB = allocateBlurIntermediate(m_targetSize);
+    frame.sceneC = allocateBlurIntermediate(m_targetSize);
     frame.fullSizeCompositor = VulkanCompositor::create(m_device);
     if (!frame.sceneA || !frame.sceneB || !frame.sceneC || !frame.fullSizeCompositor) {
         return false;
@@ -627,7 +628,7 @@ bool ItemRendererVulkan::ensureBlurFrameResources(BlurFrameResources &frame, uin
         const int divisor = 1 << std::min(level + 1, 30u);
         const QSize size(std::max(m_targetSize.width() / divisor, 1),
                          std::max(m_targetSize.height() / divisor, 1));
-        auto texture = allocateIntermediate(size);
+        auto texture = allocateBlurIntermediate(size);
         auto compositor = VulkanCompositor::create(m_device);
         if (!texture || !compositor) {
             return false;
@@ -636,6 +637,65 @@ bool ItemRendererVulkan::ensureBlurFrameResources(BlurFrameResources &frame, uin
         frame.levelCompositors.push_back(std::move(compositor));
     }
     return true;
+}
+
+std::unique_ptr<VulkanTexture> ItemRendererVulkan::allocateBlurIntermediate(const QSize &size) const
+{
+    const auto usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled;
+    auto texture = VulkanTexture::allocate(m_device, vk::Format::eR16G16B16A16Sfloat, size, usage, VulkanQueueRole::Compute);
+    if (!texture) {
+        texture = VulkanTexture::allocate(m_device, vk::Format::eR8G8B8A8Unorm, size, usage, VulkanQueueRole::Compute);
+    }
+    return texture;
+}
+
+ItemRendererVulkan::BackdropCache *ItemRendererVulkan::backdropCache(RenderView *view)
+{
+    const bool hasView = view != nullptr;
+    for (const std::unique_ptr<BackdropCache> &cache : m_backdropCaches) {
+        if (cache->hasView == hasView && cache->view.data() == view) {
+            return cache.get();
+        }
+    }
+    auto cache = std::make_unique<BackdropCache>();
+    cache->view = view;
+    cache->hasView = hasView;
+    BackdropCache *const result = cache.get();
+    m_backdropCaches.push_back(std::move(cache));
+    return result;
+}
+
+bool ItemRendererVulkan::ensureBackdropCache(BackdropCache &cache)
+{
+    if (cache.scene && cache.size == m_targetSize && cache.colorDescription == m_targetColorDescription) {
+        return true;
+    }
+
+    auto replacement = allocateBlurIntermediate(m_targetSize);
+    if (!replacement) {
+        return false;
+    }
+    if (cache.scene && cache.completionFence.isValid() && !cache.completionFence.isReadable()) {
+        // Descriptor image views do not own their images. Size or color-state
+        // changes are rare, so wait before replacing a cache still sampled by
+        // an older frame instead of carrying a retired-image list.
+        m_device->waitComputeIdle();
+        for (const std::unique_ptr<BackdropCache> &entry : m_backdropCaches) {
+            entry->completionFence = FileDescriptor{};
+        }
+    }
+    cache.scene = std::move(replacement);
+    cache.size = m_targetSize;
+    cache.colorDescription = m_targetColorDescription;
+    cache.initialized = false;
+    return true;
+}
+
+void ItemRendererVulkan::markBackdropCachesSubmitted(const FileDescriptor &completionFence)
+{
+    for (BackdropCache *cache : std::as_const(m_usedBackdropCaches)) {
+        cache->completionFence = completionFence.duplicate();
+    }
 }
 
 std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithBackdropBlur(
@@ -693,14 +753,37 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
             return std::nullopt;
         }
 
-        VulkanTexture *scene = scratch(base);
+        BackdropCache *cache = nullptr;
+        VulkanTexture *scene = nullptr;
+        Region sceneDamage = fullDamage;
+        // A per-view cache can represent the scene below the first ordered
+        // blur. Later blur inputs include earlier blurred windows and keep
+        // using frame-local scratch images.
+        if (!base && firstLayer == 0) {
+            cache = backdropCache(blur.cacheView.data());
+            if (ensureBackdropCache(*cache)) {
+                scene = cache->scene.get();
+                // Scene collection already clipped layers to this damage, so
+                // update the same tiles and preserve the remaining backdrop.
+                sceneDamage = cache->initialized ? m_damage : fullDamage;
+            } else {
+                cache = nullptr;
+            }
+        }
+        if (!scene) {
+            scene = scratch(base);
+        }
         QList<VulkanCompositorLayer> sceneLayers;
         appendBase(sceneLayers, base);
         for (size_t i = firstLayer; i < blur.layerIndex; ++i) {
             sceneLayers.push_back(m_layers[qsizetype(i)]);
         }
-        if (!submit(frame.fullSizeCompositor.get(), scene, sceneLayers, fullDamage, m_targetColorDescription)) {
+        if (!submit(frame.fullSizeCompositor.get(), scene, sceneLayers, sceneDamage, m_targetColorDescription)) {
             return std::nullopt;
+        }
+        if (cache) {
+            cache->initialized = true;
+            m_usedBackdropCaches.insert(cache);
         }
 
         VulkanTexture *read = scene;

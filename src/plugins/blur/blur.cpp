@@ -682,7 +682,8 @@ void BlurEffect::blur(const RenderTarget &renderTarget, const RenderViewport &vi
                                      cornerRadii,
                                      opacity,
                                      w->windowItem(),
-                                     surfaceItem);
+                                     surfaceItem,
+                                     m_currentView);
         return;
     }
 

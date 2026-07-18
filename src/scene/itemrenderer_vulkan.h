@@ -10,6 +10,7 @@
 
 #include <QImage>
 #include <QMetaObject>
+#include <QPointer>
 #include <unordered_set>
 
 namespace KWin
@@ -18,6 +19,7 @@ namespace KWin
 class DecorationItem;
 class ImageItem;
 class OutlinedBorderItem;
+class RenderView;
 class ShadowItem;
 class SurfaceItem;
 class TextureVulkan;
@@ -115,7 +117,8 @@ public:
                             const QVector4D &cornerRadii = {},
                             qreal groupOpacity = 1.0,
                             Item *groupRoot = nullptr,
-                            SurfaceItem *groupSurface = nullptr);
+                            SurfaceItem *groupSurface = nullptr,
+                            RenderView *cacheView = nullptr);
     void finishBackdropBlur();
 
 private:
@@ -139,6 +142,18 @@ private:
         QMatrix4x4 colorMatrix;
         std::optional<QRectF> roundedRect;
         QVector4D cornerRadii;
+        QPointer<RenderView> cacheView;
+    };
+
+    struct BackdropCache
+    {
+        QPointer<RenderView> view;
+        bool hasView = false;
+        std::unique_ptr<VulkanTexture> scene;
+        FileDescriptor completionFence;
+        QSize size;
+        std::shared_ptr<ColorDescription> colorDescription;
+        bool initialized = false;
     };
 
     struct BlurFrameResources
@@ -197,6 +212,10 @@ private:
     void appendFractionalDebugLayer(const VulkanCompositorLayer &layer);
     BlurFrameResources *acquireBlurFrame(uint32_t maximumIterationCount);
     bool ensureBlurFrameResources(BlurFrameResources &frame, uint32_t maximumIterationCount);
+    std::unique_ptr<VulkanTexture> allocateBlurIntermediate(const QSize &size) const;
+    BackdropCache *backdropCache(RenderView *view);
+    bool ensureBackdropCache(BackdropCache &cache);
+    void markBackdropCachesSubmitted(const FileDescriptor &completionFence);
     std::optional<VulkanCompositorRenderResult> renderFrameWithBackdropBlur(
         BlurFrameResources &frame,
         VulkanCompositor *captureCompositor = nullptr,
@@ -213,6 +232,8 @@ private:
     std::optional<ActiveBackdropBlurGroup> m_activeBackdropBlurGroup;
     std::array<BlurFrameResources, 3> m_blurFrames;
     uint32_t m_nextBlurFrame = 0;
+    std::vector<std::unique_ptr<BackdropCache>> m_backdropCaches;
+    std::unordered_set<BackdropCache *> m_usedBackdropCaches;
     mutable QImage m_painterOverlay;
     mutable std::unique_ptr<QPainter> m_painter;
     std::unique_ptr<VulkanTexture> m_painterTexture;
