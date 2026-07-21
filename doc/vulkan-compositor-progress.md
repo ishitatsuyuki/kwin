@@ -36,7 +36,7 @@ test unless the item explicitly says otherwise.
 - [x] Effect offscreens and render-target nesting
 - [x] Cross-fade snapshots
 - [x] Built-in offscreen color filters (Invert, Color Blindness Correction, and System Bell color/invert)
-- [x] Backdrop blur (ordered dual-Kawase passes, region and rounded-window clipping, opacity/saturation matrix, additive noise, damage-updated per-view pre-blur caching, and triple-buffered scratch resources)
+- [x] Backdrop blur (ordered dual-Kawase passes, region and rounded-window clipping, opacity/saturation matrix, additive noise, damage-updated per-view pre-blur caching, and compute-serialized per-view scratch resources)
 - [x] Arbitrary legacy effect fragment shaders through a fenced EGL/dma-buf compatibility bridge (see below)
 - [x] Layer-bound debug overlay used by the Show Compositing effect
 - [x] Fractional-coordinate debug visualizer (`KWIN_SCENE_VISUALIZE=fractional`; red texture-sampling and blue transformed-vertex overlays, shader- and renderer-tested)
@@ -582,6 +582,97 @@ damage-driven cache replacement under Vulkan validation. This removes the
 steady-state full-target scene-capture work for the common first blur; the
 downsample, upsample, blur-combination, and final-output passes are still
 recomputed, so no end-to-end GPU-time conclusion is recorded yet.
+
+## Resolved memory issue: triple-buffered blur scratch images
+
+Blur scratch images were originally rotated across three independently fenced
+sets to match the compositor's host-side frame-resource policy. Unlike mapped
+layer and descriptor buffers, these images do not need independent CPU access:
+every pass that writes or samples them is submitted to the same compute queue,
+and the compositor's image barriers order writes and reads across submissions.
+Consecutive frames can therefore reuse one scratch set without a CPU wait; the
+GPU executes those accesses in queue order. A separate set is retained per
+render view so outputs with different target sizes do not force reallocations.
+
+At the current 2560x1440 native target and four blur levels, one RGBA16F set
+(three full-size scene images plus the 1/2 through 1/16 pyramid) is about
+93.7 MiB. Replacing three sets with one saves about 187.4 MiB per active render
+view. RGBA8 fallback devices save half those amounts. Completion fences remain
+only for safe view destruction and rare size or iteration-capacity changes;
+replacement waits for outstanding descriptors before destroying their images.
+
+The Vulkan renderer regression submits six differently colored blurred frames
+without waiting for any output fence, then verifies every result. This covers
+same-scratch reuse while older frames may still be in flight, including more
+frames than the compositor's three host-resource slots, under Vulkan
+validation.
+
+## Resolved bug: tooltip blur sampled stale or flickering backdrop contents
+
+Observed on 2026-07-20 when a plasmashell tooltip appeared over an opaque
+window but retained the wallpaper-colored blur that had previously occupied its
+pre-blur cache. Vulkan runs the dual-Kawase passes over full-output images, so
+the backdrop capture must include the filter's sampling footprint outside the
+visible blur shape. `BackgroundEffectItem` only expanded opacity handling below
+the effect and did not consume its own scheduled repaints. A newly shown
+tooltip consequently collected only its 16x16-tile-aligned surface footprint;
+the cache repair left the surrounding wallpaper pixels for the blur kernel to
+sample.
+
+Background effects can now request scene-repaint expansion independently of
+the existing opaque-region handling. The Vulkan blur path uses its configured
+kernel expansion, while OpenGL retains its window-local, clamp-to-edge capture.
+Background-effect item repaints are also consumed and preserved like ordinary
+item damage, so creating or moving an effect triggers collection of the whole
+sampling footprint. Damage is tested against that expanded footprint as well:
+checking only the visible blur rectangle ignored updates immediately outside
+the tooltip even though the full-output Vulkan kernel sampled them, which made
+an actively updating backdrop flicker between stale and current blur contents.
+
+The Vulkan integration regression initializes a blur cache, changes the
+complete opaque backdrop while blur is absent, then shows a tooltip-sized blur
+at strength 11. It also alternates partial backdrop damage outside both the
+tooltip and its 16x16 tile footprint but inside the kernel sampling margin.
+Before the fix the initial local repaint differed from a full repaint by up to
+251 channel values and the sampling-margin update by up to 53; the local and
+repeated-update results now match full-repaint references within two under
+Vulkan validation.
+
+A 2026-07-21 comparison against the installed OpenGL compositor found a second,
+independent color error: OpenGL applies the blur saturation matrix as
+`color * matrix`, while the generic Vulkan color filter evaluates column
+vectors. Passing the effect matrix through unchanged therefore transposed the
+intended channel mixing. The default 150% saturation matrix is asymmetric, so
+this produced a visible purple cast and could appear as a colored flash while a
+tooltip group faded. The Vulkan blur layer now transposes that effect-owned
+matrix before using the generic filter. The serialized-scratch regression uses
+six distinct solid backdrops and the same asymmetric 150% matrix, then compares
+every queued result with the OpenGL row-vector equation; the uncorrected path
+fails this check.
+
+A 2026-07-22 live run of the rebuilt Vulkan compositor confirmed the color fix
+but isolated a remaining blur-background flicker to tooltips whose own surface
+repainted continuously, for example while displaying a live window preview.
+The preview pixels themselves remained stable, and the source window did not
+need to be the window behind the tooltip. `BackgroundEffectItem` is below the
+window surface in the item tree, so repaint accumulation visited it before the
+same window's new surface damage existed. The Vulkan sampling-footprint repaint
+was therefore not scheduled for those surface-driven frames. Windows with a
+nonzero background sampling margin now schedule their background-effect item
+whenever the window is damaged, making the expanded repaint available before
+the traversal reaches the surface. The integration regression repeatedly
+repaints an otherwise unchanged translucent tooltip and compares every local
+frame with a full-repaint reference.
+
+The one-scratch implementation also retained a final completion fence per view
+but previously relied only on compute-queue submission order when reusing that
+scratch. Reuse now imports the retained fence as an explicit dependency of the
+next blur invocation, matching the intended serialized-work invariant. The
+queued six-frame regression and Vulkan validation cover reuse while all output
+fences remain unwaited. Both 2026-07-22 changes pass automated validation and
+were confirmed in the visible session after deliberately replacing KWin with
+the rebuilt Vulkan compositor: continuously updating task manager previews no
+longer made the tooltip blur background flicker.
 
 ## Resolved performance issue: steady-state Vulkan resource churn
 

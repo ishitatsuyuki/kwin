@@ -168,6 +168,13 @@ private:
         QSize size;
     };
 
+    struct BlurTargetResources
+    {
+        QPointer<RenderView> view;
+        bool hasView = false;
+        BlurFrameResources frame;
+    };
+
     struct ActiveBackdropBlurGroup
     {
         size_t blurIndex;
@@ -210,7 +217,7 @@ private:
                             const std::optional<RoundedClip> &roundedClip = std::nullopt,
                             bool opaque = false);
     void appendFractionalDebugLayer(const VulkanCompositorLayer &layer);
-    BlurFrameResources *acquireBlurFrame(uint32_t maximumIterationCount);
+    BlurFrameResources *acquireBlurFrame(RenderView *view, uint32_t maximumIterationCount);
     bool ensureBlurFrameResources(BlurFrameResources &frame, uint32_t maximumIterationCount);
     std::unique_ptr<VulkanTexture> allocateBlurIntermediate(const QSize &size) const;
     BackdropCache *backdropCache(RenderView *view);
@@ -230,8 +237,7 @@ private:
     QList<VulkanCompositorLayer> m_layers;
     QList<BackdropBlur> m_backdropBlurs;
     std::optional<ActiveBackdropBlurGroup> m_activeBackdropBlurGroup;
-    std::array<BlurFrameResources, 3> m_blurFrames;
-    uint32_t m_nextBlurFrame = 0;
+    std::vector<std::unique_ptr<BlurTargetResources>> m_blurTargets;
     std::vector<std::unique_ptr<BackdropCache>> m_backdropCaches;
     std::unordered_set<BackdropCache *> m_usedBackdropCaches;
     mutable QImage m_painterOverlay;

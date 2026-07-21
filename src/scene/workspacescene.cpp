@@ -567,9 +567,16 @@ static void accumulateRepaints(Item *item, SceneView *view, Region *windowRepain
     }
     if (auto background = qobject_cast<BackgroundEffectItem *>(item)) {
         const Rect viewRect = view->mapToDeviceCoordinates(item->mapToView(item->rect(), view)).rounded();
-        if (accumulatedRepaints->intersects(viewRect)) {
-            *windowRepaints |= viewRect;
-            *accumulatedRepaints |= viewRect;
+        const Region itemRepaints = item->takeDeviceRepaints(view);
+        *windowRepaints |= itemRepaints;
+        *accumulatedRepaints |= itemRepaints;
+        Region effectRepaints = viewRect;
+        if (uint32_t pixels = background->pixelsToExpandRepaints()) {
+            effectRepaints = effectRepaints.grownBy(QMargins(pixels, pixels, pixels, pixels));
+        }
+        if (accumulatedRepaints->intersects(effectRepaints)) {
+            *windowRepaints |= effectRepaints;
+            *accumulatedRepaints |= effectRepaints;
             if (uint32_t pixels = background->pixelsToExpandRepaintsBelowOpaqueRegions()) {
                 *forceTranslucent |= accumulatedRepaints->grownBy(QMargins(pixels, pixels, pixels, pixels)) & viewRect;
             }

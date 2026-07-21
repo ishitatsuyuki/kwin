@@ -89,6 +89,7 @@ private Q_SLOTS:
     void testNativeTargetTransforms();
     void testItemRendererPainterOverlay();
     void testItemRendererBackdropBlur();
+    void testItemRendererBackdropBlurSerializedScratchReuse();
     void testItemRendererNestedTarget();
     void testItemRendererFractionalDebug();
     void testItemRendererScene();
@@ -1887,6 +1888,107 @@ void VulkanTest::testItemRendererBackdropBlur()
     QVERIFY(std::abs(cachedChangedPixel.green() - referenceChangedPixel.green()) <= 1);
     QVERIFY(std::abs(cachedChangedPixel.blue() - referenceChangedPixel.blue()) <= 1);
     QVERIFY(cachedChangedPixel != expectedAfterPartialRepaint.pixelColor(9, 6));
+}
+
+void VulkanTest::testItemRendererBackdropBlurSerializedScratchReuse()
+{
+    const QSize outputSize(64, 48);
+    constexpr qreal saturation = 1.5;
+    constexpr qreal redLuminance = 0.2126;
+    constexpr qreal greenLuminance = 0.7152;
+    constexpr qreal blueLuminance = 0.0722;
+    const qreal redValue = (1.0 - saturation) * redLuminance;
+    const qreal greenValue = (1.0 - saturation) * greenLuminance;
+    const qreal blueValue = (1.0 - saturation) * blueLuminance;
+    const QMatrix4x4 glColorMatrix(redValue + saturation, redValue, redValue, 0.0,
+                                   greenValue, greenValue + saturation, greenValue, 0.0,
+                                   blueValue, blueValue, blueValue + saturation, 0.0,
+                                   0.0, 0.0, 0.0, 1.0);
+    const std::array colors{
+        QColor(221, 43, 67),
+        QColor(37, 211, 89),
+        QColor(41, 73, 223),
+        QColor(229, 181, 31),
+        QColor(181, 47, 213),
+        QColor(29, 201, 207),
+    };
+    std::vector<std::unique_ptr<VulkanTexture>> backgrounds;
+    backgrounds.reserve(colors.size());
+    for (const QColor &color : colors) {
+        QImage image(1, 1, QImage::Format_RGBA8888_Premultiplied);
+        image.fill(color);
+        auto texture = VulkanTexture::upload(m_device,
+                                             image,
+                                             vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                                             VulkanQueueRole::Compute);
+        QVERIFY(texture);
+        backgrounds.push_back(std::move(texture));
+    }
+
+    const std::array vertices{
+        QPointF(0, 0),
+        QPointF(outputSize.width(), 0),
+        QPointF(outputSize.width(), outputSize.height()),
+        QPointF(0, outputSize.height()),
+    };
+    const std::array textureCoordinates{
+        QPointF(0, 0),
+        QPointF(1, 0),
+        QPointF(1, 1),
+        QPointF(0, 1),
+    };
+
+    ItemRendererVulkan renderer(m_device);
+    QVERIFY(renderer.isValid());
+    std::vector<std::unique_ptr<VulkanTexture>> outputs;
+    std::vector<FileDescriptor> completionFences;
+    outputs.reserve(colors.size());
+    completionFences.reserve(colors.size());
+    for (size_t frameIndex = 0; frameIndex < colors.size(); ++frameIndex) {
+        auto output = VulkanTexture::allocate(m_device,
+                                              vk::Format::eR8G8B8A8Unorm,
+                                              outputSize,
+                                              vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+                                              VulkanQueueRole::Compute);
+        QVERIFY(output);
+        VulkanRenderTarget vulkanTarget(output.get());
+        const RenderTarget target(&vulkanTarget);
+        const RenderViewport viewport(RectF(QPointF(), QSizeF(outputSize)), 1.0, target, QPoint());
+
+        renderer.beginFrame(target, viewport);
+        renderer.renderBackground(target, viewport, Region(Rect(QPoint(), outputSize)));
+        renderer.renderTextureQuad(backgrounds[frameIndex].get(),
+                                   vertices,
+                                   textureCoordinates,
+                                   QRectF(QPointF(), QSizeF(outputSize)),
+                                   1.0,
+                                   1.0,
+                                   1.0);
+        renderer.renderBackdropBlur({QRectF(8, 8, 48, 32)}, 4, 3.0, 1.0, 1.0, 0, glColorMatrix);
+        renderer.endFrame();
+
+        completionFences.push_back(vulkanTarget.takeCompletionFence());
+        QVERIFY(completionFences.back().isValid());
+        outputs.push_back(std::move(output));
+    }
+
+    // None of the output fences were waited before submitting the next frame.
+    // Every frame therefore reused one scratch set while older work could
+    // still be in flight on the compute queue.
+    for (size_t frameIndex = 0; frameIndex < colors.size(); ++frameIndex) {
+        const QImage frame = outputs[frameIndex]->download();
+        QVERIFY(!frame.isNull());
+        const QColor actual = frame.pixelColor(outputSize.width() / 2, outputSize.height() / 2);
+        const QVector4D input(colors[frameIndex].redF(),
+                              colors[frameIndex].greenF(),
+                              colors[frameIndex].blueF(),
+                              colors[frameIndex].alphaF());
+        const QVector4D expected = input * glColorMatrix;
+        QVERIFY(std::abs(actual.redF() - std::clamp(expected.x(), 0.0f, 1.0f)) <= 1.0 / 255.0);
+        QVERIFY(std::abs(actual.greenF() - std::clamp(expected.y(), 0.0f, 1.0f)) <= 1.0 / 255.0);
+        QVERIFY(std::abs(actual.blueF() - std::clamp(expected.z(), 0.0f, 1.0f)) <= 1.0 / 255.0);
+        QCOMPARE(actual.alpha(), 255);
+    }
 }
 
 void VulkanTest::testItemRendererNestedTarget()

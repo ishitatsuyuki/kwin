@@ -264,6 +264,7 @@ void BlurEffect::reconfigure(ReconfigureFlags flags)
     m_colorMatrix = colorTransformMatrix(BlurConfig::saturation() / 100.0, 1.0);
     for (auto &[window, data] : m_windows) {
         data.blurItem->setPixelsToExpandRepaintsBelowOpaqueRegions(m_expandSize);
+        data.blurItem->setPixelsToExpandRepaints(effects->compositingType() == VulkanCompositing ? m_expandSize : 0);
     }
 
     // Update all windows for the blur to take effect
@@ -324,6 +325,7 @@ void BlurEffect::updateBlurRegion(EffectWindow *w)
             data.blurItem = std::make_unique<BackgroundEffectItem>(w->windowItem());
         }
         data.blurItem->setPixelsToExpandRepaintsBelowOpaqueRegions(m_expandSize);
+        data.blurItem->setPixelsToExpandRepaints(effects->compositingType() == VulkanCompositing ? m_expandSize : 0);
         data.blurItem->setEffectBoundingRect(blurRegion(w).boundingRect());
     } else {
         if (auto it = m_windows.find(w); it != m_windows.end()) {

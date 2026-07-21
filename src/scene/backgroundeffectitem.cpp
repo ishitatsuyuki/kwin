@@ -8,6 +8,7 @@
 */
 #include "scene/backgroundeffectitem.h"
 #include "scene/windowitem.h"
+#include "window.h"
 
 namespace KWin
 {
@@ -20,6 +21,16 @@ BackgroundEffectItem::BackgroundEffectItem(WindowItem *parentItem)
     setZ(-1'000'000);
     addEffect();
     connect(parentItem->windowContainer(), &Item::boundingRectChanged, this, &BackgroundEffectItem::updateGeometry);
+    connect(parentItem->window(), &Window::damaged, this, [this]() {
+        // BackgroundEffectItem is below the surface in the item tree, so
+        // repaint accumulation visits it before it sees damage from that
+        // surface. Schedule the effect explicitly when it needs a sampling
+        // margin; this makes the expanded repaint available at the point
+        // where the background item is traversed.
+        if (m_pixelsToExpandRepaints > 0) {
+            scheduleRepaint(rect());
+        }
+    });
 }
 
 uint32_t BackgroundEffectItem::pixelsToExpandRepaintsBelowOpaqueRegions() const
@@ -30,6 +41,16 @@ uint32_t BackgroundEffectItem::pixelsToExpandRepaintsBelowOpaqueRegions() const
 void BackgroundEffectItem::setPixelsToExpandRepaintsBelowOpaqueRegions(uint32_t pixels)
 {
     m_pixelsToExpandRepaintsBelowOpaqueRegions = pixels;
+}
+
+uint32_t BackgroundEffectItem::pixelsToExpandRepaints() const
+{
+    return m_pixelsToExpandRepaints;
+}
+
+void BackgroundEffectItem::setPixelsToExpandRepaints(uint32_t pixels)
+{
+    m_pixelsToExpandRepaints = pixels;
 }
 
 void BackgroundEffectItem::setEffectBoundingRect(const RectF &boundingRect)

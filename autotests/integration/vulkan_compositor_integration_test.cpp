@@ -117,7 +117,7 @@ class BlurTestWindow : public QRasterWindow
 public:
     BlurTestWindow()
     {
-        setFlags(Qt::FramelessWindowHint);
+        setFlags(Qt::FramelessWindowHint | Qt::ToolTip);
         QSurfaceFormat format;
         format.setAlphaBufferSize(8);
         setFormat(format);
@@ -133,6 +133,37 @@ protected:
     }
 };
 
+class SolidTestWindow : public QRasterWindow
+{
+public:
+    explicit SolidTestWindow(const QColor &color)
+        : m_color(color)
+    {
+        setFlags(Qt::FramelessWindowHint);
+    }
+
+    void setPatch(const QRect &rect, const QColor &color)
+    {
+        m_patchRect = rect;
+        m_patchColor = color;
+        update(rect);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.fillRect(QRect(QPoint(), size()), m_color);
+        painter.fillRect(m_patchRect, m_patchColor);
+    }
+
+private:
+    QColor m_color;
+    QRect m_patchRect;
+    QColor m_patchColor;
+};
+
 void VulkanCompositorIntegrationTest::initTestCase()
 {
     if (!Test::renderNodeAvailable()) {
@@ -146,6 +177,8 @@ void VulkanCompositorIntegrationTest::initTestCase()
     for (const QString &name : EffectLoader().listOfKnownEffects()) {
         plugins.writeEntry(name + QStringLiteral("Enabled"), false);
     }
+    KConfigGroup blur(config, QStringLiteral("Effect-blur"));
+    blur.writeEntry("BlurStrength", 11);
     config->sync();
     kwinApp()->setConfig(config);
     qputenv("KWIN_COMPOSE", QByteArrayLiteral("V"));
@@ -618,6 +651,129 @@ void VulkanCompositorIntegrationTest::testBackdropBlur()
                              5000);
 
     window.hide();
+
+    // The pre-blur cache was initialized while the tooltip-sized blur was over
+    // the old desktop contents. Change the complete opaque backdrop while no
+    // blur is being painted, then show the blur again. Its first local repaint
+    // must not sample the stale cached desktop around the window.
+    const QColor backdropColor(29, 83, 211);
+    windowAddedSpy.clear();
+    SolidTestWindow backdrop(backdropColor);
+    backdrop.setGeometry(0, 0, 1280, 1024);
+    backdrop.show();
+    QTRY_COMPARE(windowAddedSpy.count(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(([&]() {
+        const QImage frame = layer->texture() ? layer->texture()->download() : QImage{};
+        return !frame.isNull() && frame.pixelColor(100, 100) == backdropColor;
+    })(),
+                             5000);
+
+    windowAddedSpy.clear();
+    QSignalSpy partialPresentedSpy(workspace()->outputs().front()->backendOutput()->renderLoop(), &RenderLoop::framePresented);
+    window.show();
+    QTRY_COMPARE(windowAddedSpy.count(), 1);
+    QVERIFY(partialPresentedSpy.wait());
+    const QImage partialFrame = layer->texture()->download();
+    QVERIFY(!partialFrame.isNull());
+    QVERIFY(partialFrame.pixelColor(550, 390) != backdropColor);
+
+    QSignalSpy presentedSpy(workspace()->outputs().front()->backendOutput()->renderLoop(), &RenderLoop::framePresented);
+    kwinApp()->scene()->addRepaintFull();
+    QVERIFY(presentedSpy.wait());
+    const QImage fullFrame = layer->texture()->download();
+    QVERIFY(!fullFrame.isNull());
+
+    const auto maximumChannelDifference = [](const QImage &left, const QImage &right, const QRect &rect) {
+        int ret = 0;
+        for (int y = rect.top(); y <= rect.bottom(); ++y) {
+            for (int x = rect.left(); x <= rect.right(); ++x) {
+                const QColor leftPixel = left.pixelColor(x, y);
+                const QColor rightPixel = right.pixelColor(x, y);
+                ret = std::max({ret,
+                                std::abs(leftPixel.red() - rightPixel.red()),
+                                std::abs(leftPixel.green() - rightPixel.green()),
+                                std::abs(leftPixel.blue() - rightPixel.blue()),
+                                std::abs(leftPixel.alpha() - rightPixel.alpha())});
+            }
+        }
+        return ret;
+    };
+    int maximumDifference = maximumChannelDifference(partialFrame, fullFrame, QRect(421, 301, 258, 178));
+    QVERIFY2(maximumDifference <= 2,
+             qPrintable(QStringLiteral("locally repainted backdrop blur sampled a stale scene; maximum channel difference was %1").arg(maximumDifference)));
+
+    // A live window thumbnail repaints its containing tooltip every frame even
+    // when the scene behind the tooltip is unchanged. Repeated surface-only
+    // damage must not make the cached blur alternate between old scratch
+    // contents and the stable backdrop.
+    for (int frameIndex = 0; frameIndex < 8; ++frameIndex) {
+        QSignalSpy tooltipPresentedSpy(workspace()->outputs().front()->backendOutput()->renderLoop(), &RenderLoop::framePresented);
+        window.update();
+        QVERIFY(tooltipPresentedSpy.wait());
+        const QImage tooltipFrame = layer->texture()->download();
+        QVERIFY(!tooltipFrame.isNull());
+        maximumDifference = maximumChannelDifference(tooltipFrame, fullFrame, QRect(421, 301, 258, 178));
+        QVERIFY2(maximumDifference <= 2,
+                 qPrintable(QStringLiteral("surface-only tooltip update %1 flickered; maximum channel difference was %2")
+                                .arg(frameIndex)
+                                .arg(maximumDifference)));
+    }
+
+    // Damage just outside the visible tooltip still changes pixels sampled by
+    // the blur kernel. It must trigger a repaint even though neither the
+    // original damage nor its 16x16 tile footprint intersects the tooltip.
+    const QRect adjacentDamage(320, 330, 80, 120);
+    QSignalSpy adjacentPresentedSpy(workspace()->outputs().front()->backendOutput()->renderLoop(), &RenderLoop::framePresented);
+    backdrop.setPatch(adjacentDamage, QColor(235, 41, 37));
+    QVERIFY(adjacentPresentedSpy.wait());
+    const QImage adjacentFrame = layer->texture()->download();
+    QVERIFY(!adjacentFrame.isNull());
+
+    QSignalSpy adjacentFullPresentedSpy(workspace()->outputs().front()->backendOutput()->renderLoop(), &RenderLoop::framePresented);
+    kwinApp()->scene()->addRepaintFull();
+    QVERIFY(adjacentFullPresentedSpy.wait());
+    const QImage adjacentFullFrame = layer->texture()->download();
+    QVERIFY(!adjacentFullFrame.isNull());
+
+    const QRect adjacentBlurArea(421, 331, 79, 118);
+    maximumDifference = maximumChannelDifference(adjacentFrame, adjacentFullFrame, adjacentBlurArea);
+    QVERIFY2(maximumDifference <= 2,
+             qPrintable(QStringLiteral("damage in the blur sampling margin was ignored; maximum channel difference was %1").arg(maximumDifference)));
+
+    const QColor alternateColor(37, 219, 91);
+    QSignalSpy alternatePresentedSpy(workspace()->outputs().front()->backendOutput()->renderLoop(), &RenderLoop::framePresented);
+    backdrop.setPatch(adjacentDamage, alternateColor);
+    QVERIFY(alternatePresentedSpy.wait());
+    const QImage alternateFrame = layer->texture()->download();
+    QVERIFY(!alternateFrame.isNull());
+
+    QSignalSpy alternateFullPresentedSpy(workspace()->outputs().front()->backendOutput()->renderLoop(), &RenderLoop::framePresented);
+    kwinApp()->scene()->addRepaintFull();
+    QVERIFY(alternateFullPresentedSpy.wait());
+    const QImage alternateFullFrame = layer->texture()->download();
+    QVERIFY(!alternateFullFrame.isNull());
+    maximumDifference = maximumChannelDifference(alternateFrame, alternateFullFrame, adjacentBlurArea);
+    QVERIFY2(maximumDifference <= 2,
+             qPrintable(QStringLiteral("alternate damage in the blur sampling margin was ignored; maximum channel difference was %1").arg(maximumDifference)));
+
+    const QColor adjacentColor(235, 41, 37);
+    for (int frameIndex = 0; frameIndex < 6; ++frameIndex) {
+        const bool alternate = frameIndex % 2;
+        QSignalSpy updatePresentedSpy(workspace()->outputs().front()->backendOutput()->renderLoop(), &RenderLoop::framePresented);
+        backdrop.setPatch(adjacentDamage, alternate ? alternateColor : adjacentColor);
+        QVERIFY(updatePresentedSpy.wait());
+        const QImage updatedFrame = layer->texture()->download();
+        QVERIFY(!updatedFrame.isNull());
+        const QImage &reference = alternate ? alternateFullFrame : adjacentFullFrame;
+        maximumDifference = maximumChannelDifference(updatedFrame, reference, adjacentBlurArea);
+        QVERIFY2(maximumDifference <= 2,
+                 qPrintable(QStringLiteral("blur sampling-margin update %1 flickered; maximum channel difference was %2")
+                                .arg(frameIndex)
+                                .arg(maximumDifference)));
+    }
+
+    window.hide();
+    backdrop.hide();
     effects->unloadEffect(QStringLiteral("blur"));
 }
 

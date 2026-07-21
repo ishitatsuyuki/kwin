@@ -212,6 +212,10 @@ void ItemRendererVulkan::beginFrame(const RenderTarget &renderTarget, const Rend
         return cache->hasView && cache->view.isNull()
             && (!cache->completionFence.isValid() || cache->completionFence.isReadable());
     });
+    std::erase_if(m_blurTargets, [](const std::unique_ptr<BlurTargetResources> &target) {
+        return target->hasView && target->view.isNull()
+            && (!target->frame.completionFence.isValid() || target->frame.completionFence.isReadable());
+    });
     m_imageTarget = renderTarget.image();
     m_vulkanTarget = renderTarget.vulkanTarget();
     m_targetSize = renderTarget.size();
@@ -279,7 +283,7 @@ void ItemRendererVulkan::endFrame()
     BlurFrameResources *blurFrame = nullptr;
     if (!m_backdropBlurs.isEmpty()) {
         const uint32_t maximumIterationCount = std::ranges::max(m_backdropBlurs, {}, &BackdropBlur::iterationCount).iterationCount;
-        blurFrame = acquireBlurFrame(maximumIterationCount);
+        blurFrame = acquireBlurFrame(m_backdropBlurs.front().cacheView.data(), maximumIterationCount);
         if (blurFrame) {
             result = renderFrameWithBackdropBlur(*blurFrame);
         }
@@ -481,7 +485,7 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderCurrentLay
     }
     if (!m_backdropBlurs.isEmpty()) {
         const uint32_t maximumIterationCount = std::ranges::max(m_backdropBlurs, {}, &BackdropBlur::iterationCount).iterationCount;
-        BlurFrameResources *frame = acquireBlurFrame(maximumIterationCount);
+        BlurFrameResources *frame = acquireBlurFrame(m_backdropBlurs.front().cacheView.data(), maximumIterationCount);
         if (!frame) {
             return std::nullopt;
         }
@@ -577,30 +581,21 @@ void ItemRendererVulkan::finishBackdropBlur()
     m_activeBackdropBlurGroup.reset();
 }
 
-ItemRendererVulkan::BlurFrameResources *ItemRendererVulkan::acquireBlurFrame(uint32_t maximumIterationCount)
+ItemRendererVulkan::BlurFrameResources *ItemRendererVulkan::acquireBlurFrame(RenderView *view, uint32_t maximumIterationCount)
 {
-    for (uint32_t offset = 0; offset < m_blurFrames.size(); ++offset) {
-        const uint32_t index = (m_nextBlurFrame + offset) % m_blurFrames.size();
-        BlurFrameResources &frame = m_blurFrames[index];
-        if (!frame.completionFence.isValid() || frame.completionFence.isReadable()) {
-            frame.completionFence = FileDescriptor{};
-            if (!ensureBlurFrameResources(frame, maximumIterationCount)) {
-                return nullptr;
-            }
-            m_nextBlurFrame = (index + 1) % m_blurFrames.size();
-            return &frame;
+    const bool hasView = view != nullptr;
+    for (const std::unique_ptr<BlurTargetResources> &target : m_blurTargets) {
+        if (target->hasView == hasView && target->view.data() == view) {
+            return ensureBlurFrameResources(target->frame, maximumIterationCount) ? &target->frame : nullptr;
         }
     }
 
-    // Match the compositor's frame-resource policy: only block if three blur
-    // frames are still in flight and their scratch images cannot be reused.
-    m_device->waitComputeIdle();
-    for (BlurFrameResources &frame : m_blurFrames) {
-        frame.completionFence = FileDescriptor{};
-    }
-    BlurFrameResources &frame = m_blurFrames[m_nextBlurFrame];
-    m_nextBlurFrame = (m_nextBlurFrame + 1) % m_blurFrames.size();
-    return ensureBlurFrameResources(frame, maximumIterationCount) ? &frame : nullptr;
+    auto target = std::make_unique<BlurTargetResources>();
+    target->view = view;
+    target->hasView = hasView;
+    BlurFrameResources *const frame = &target->frame;
+    m_blurTargets.push_back(std::move(target));
+    return ensureBlurFrameResources(*frame, maximumIterationCount) ? frame : nullptr;
 }
 
 bool ItemRendererVulkan::ensureBlurFrameResources(BlurFrameResources &frame, uint32_t maximumIterationCount)
@@ -612,6 +607,20 @@ bool ItemRendererVulkan::ensureBlurFrameResources(BlurFrameResources &frame, uin
         return true;
     }
 
+    if (frame.sceneA) {
+        // Scratch work for consecutive frames is serialized by an explicit
+        // completion-fence dependency on the compute queue, so one image set
+        // per render view is sufficient.
+        // Resource replacement is rare and still requires all old descriptor
+        // references to finish before their images can be destroyed.
+        m_device->waitComputeIdle();
+        for (const std::unique_ptr<BlurTargetResources> &target : m_blurTargets) {
+            target->frame.completionFence = FileDescriptor{};
+        }
+        for (const std::unique_ptr<BackdropCache> &cache : m_backdropCaches) {
+            cache->completionFence = FileDescriptor{};
+        }
+    }
     frame = BlurFrameResources{};
     frame.size = m_targetSize;
     frame.sceneA = allocateBlurIntermediate(m_targetSize);
@@ -723,9 +732,15 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
         return static_cast<VulkanTexture *>(nullptr);
     };
     FileDescriptor pendingAcquireFence = takeAcquireFence();
+    if (frame.completionFence.isValid()) {
+        pendingAcquireFence = pendingAcquireFence.isValid()
+            ? SyncReleasePoint::mergeSyncFds(frame.completionFence, pendingAcquireFence)
+            : frame.completionFence.duplicate();
+    }
     // Intermediate passes are ordered on the compute queue and scratch reuse is
-    // gated by the final fence. Their results are otherwise discarded, so do
-    // not allocate timestamp query pools that no consumer will read.
+    // explicitly gated by the previous blur's final fence. Their results are
+    // otherwise discarded, so do not allocate timestamp query pools that no
+    // consumer will read.
     const auto submit = [this, &pendingAcquireFence](VulkanCompositor *compositor,
                                                      VulkanTexture *target,
                                                      const QList<VulkanCompositorLayer> &layers,
@@ -832,7 +847,11 @@ std::optional<VulkanCompositorRenderResult> ItemRendererVulkan::renderFrameWithB
                 .cornerRadii = blur.cornerRadii,
                 .blendMode = VulkanBlendMode::BackdropReplace,
                 .colorFilter = VulkanColorFilter::BlurUpsampleAndColorize,
-                .colorFilterMatrix = blur.colorMatrix,
+                // The OpenGL blur shader applies this effect-owned matrix as
+                // a row vector (color * matrix). The generic Vulkan color
+                // filter uses column vectors, so transpose it to preserve the
+                // established channel-mixing convention.
+                .colorFilterMatrix = blur.colorMatrix.transposed(),
                 .colorFilterParameters = QVector4D(blur.offset, blur.modulation, 0.0, 0.0),
             });
             if (blur.noiseStrength > 0 && m_blurNoiseTexture) {

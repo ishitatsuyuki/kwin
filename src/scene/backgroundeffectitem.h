@@ -31,10 +31,15 @@ public:
     uint32_t pixelsToExpandRepaintsBelowOpaqueRegions() const;
     void setPixelsToExpandRepaintsBelowOpaqueRegions(uint32_t pixels);
 
+    /** Extra scene pixels that the effect samples outside its visible bounds. */
+    uint32_t pixelsToExpandRepaints() const;
+    void setPixelsToExpandRepaints(uint32_t pixels);
+
 private:
     void updateGeometry();
 
     uint32_t m_pixelsToExpandRepaintsBelowOpaqueRegions = 0;
+    uint32_t m_pixelsToExpandRepaints = 0;
     WindowItem *const m_windowItem;
     RectF m_effectBounds;
 };
