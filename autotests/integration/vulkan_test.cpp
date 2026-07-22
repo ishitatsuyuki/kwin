@@ -92,6 +92,7 @@ private Q_SLOTS:
     void testItemRendererBackdropBlurSerializedScratchReuse();
     void testItemRendererNestedTarget();
     void testItemRendererFractionalDebug();
+    void testItemRendererFractionalAlignment();
     void testItemRendererScene();
     void testItemRendererWindowTransform();
     void testDeviceLossRecovery();
@@ -2117,6 +2118,77 @@ void VulkanTest::testItemRendererFractionalDebug()
     QVERIFY(marked.red() > marked.green());
     QVERIFY(marked.blue() > marked.green());
     QCOMPARE(marked.alpha(), 255);
+}
+
+void VulkanTest::testItemRendererFractionalAlignment()
+{
+    TestScene scene;
+
+    Item group(scene.root());
+    group.setPosition(QPointF(1, 0));
+
+    QImage pattern(8, 1, QImage::Format_RGBA8888_Premultiplied);
+    for (int x = 0; x < pattern.width(); ++x) {
+        pattern.setPixelColor(x, 0, (x & 1) ? Qt::white : Qt::black);
+    }
+    ImageItem item(&group);
+    item.setImage(pattern);
+    // 6 logical pixels become 7.5 device pixels; matching OpenGL requires
+    // rounding the right edge to produce an 8-pixel destination rectangle.
+    item.setSize(QSizeF(6, 0.8));
+    item.setPosition(QPointF(1, 0));
+
+    constexpr qreal scale = 1.25;
+    const QSize outputSize(14, 3);
+    const Region outputRegion(Rect(QPoint(), outputSize));
+    WindowPaintData paintData;
+
+    const auto render = [&](std::unique_ptr<ItemRenderer> renderer) {
+        QImage image(outputSize, QImage::Format_RGBA8888_Premultiplied);
+        image.fill(Qt::transparent);
+        const RenderTarget target(&image);
+        const RenderViewport viewport(RectF(QPointF(), QSizeF(outputSize) / scale), scale, target, QPoint());
+        ItemRenderer *rendererPointer = renderer.get();
+        scene.attachRenderer(std::move(renderer));
+        rendererPointer->beginFrame(target, viewport);
+        rendererPointer->renderBackground(target, viewport, outputRegion);
+        rendererPointer->renderItem(target, viewport, scene.root(), 0, outputRegion, paintData, {}, {});
+        rendererPointer->endFrame();
+        return image;
+    };
+
+    QImage glActual;
+    if (m_glContext && m_glContext->makeCurrent()) {
+        auto glTargetTexture = GLTexture::allocate(GL_RGBA8, outputSize);
+        QVERIFY(glTargetTexture);
+        GLFramebuffer glFramebuffer(glTargetTexture.get());
+        QVERIFY(glFramebuffer.valid());
+        const RenderTarget glTarget(&glFramebuffer);
+        const RenderViewport glViewport(RectF(QPointF(), QSizeF(outputSize) / scale), scale, glTarget, QPoint());
+        auto glRenderer = std::make_unique<ItemRendererOpenGL>(m_glContext->displayObject());
+        ItemRenderer *glRendererPointer = glRenderer.get();
+        scene.attachRenderer(std::move(glRenderer));
+        glRendererPointer->beginFrame(glTarget, glViewport);
+        glRendererPointer->renderBackground(glTarget, glViewport, outputRegion);
+        glRendererPointer->renderItem(glTarget, glViewport, scene.root(), 0, outputRegion, paintData, {}, {});
+        glRendererPointer->endFrame();
+        glFinish();
+        glActual = glTargetTexture->toImage().mirrored();
+    }
+
+    auto vulkanRenderer = std::make_unique<ItemRendererVulkan>(m_device);
+    QVERIFY(vulkanRenderer->isValid());
+    const QImage actual = render(std::move(vulkanRenderer));
+
+    for (int x = 0; x < pattern.width(); ++x) {
+        QCOMPARE(actual.pixelColor(x + 2, 0), pattern.pixelColor(x, 0));
+    }
+    QCOMPARE(actual.pixelColor(1, 0), QColor(Qt::transparent));
+    QCOMPARE(actual.pixelColor(10, 0), QColor(Qt::transparent));
+    if (!glActual.isNull()) {
+        const int difference = maximumChannelDifference(actual, glActual);
+        QVERIFY2(difference <= 1, qPrintable(QStringLiteral("maximum fractional-alignment GL/Vulkan channel difference was %1").arg(difference)));
+    }
 }
 
 void VulkanTest::testItemRendererScene()

@@ -45,6 +45,7 @@ test unless the item explicitly says otherwise.
 
 - [x] Vulkan render target with acquire/completion fences and GPU timing
 - [x] Vulkan `ItemRenderer` scene traversal
+- [x] OpenGL-parity device-pixel snapping for ordinary item translations and textured geometry at fractional output scales
 - [x] Selectable `VulkanCompositing` mode (`KWIN_COMPOSE=V`)
 - [x] Vulkan dma-buf output-layer swapchain and buffer-age tracking
 - [x] DRM backend (compiled; virtual DRM coverage, physical KMS run still needed)
@@ -415,6 +416,32 @@ position with the same device-pixel snapping used by OpenGL. The differential
 regression renders a directly positioned root item with simultaneous scale and
 translation at 1.25x output scale and compares Vulkan with both an explicit
 reference and the OpenGL renderer.
+
+## Resolved bug: fractional-scale item trees were blurred
+
+Observed on 2026-07-22 in the live Vulkan session at 1.25x output scale. A
+native 2560x1440 compositor screenshot showed the soft text and one-pixel edges
+in Konsole, Dolphin, and the Plasma panel, proving that the interpolation was
+already present in the composed framebuffer rather than being introduced by
+the monitor or scanout path.
+
+The OpenGL item renderer rounds every item translation and every ordinary quad
+vertex after applying the output scale. Vulkan snapped only the requested root
+item and kept descendant positions and texture destination edges fractional.
+For example, two nested one-logical-pixel translations became 2.5 output pixels
+at 1.25x in Vulkan, while OpenGL independently rounded them to one output pixel
+each. Linear sampling then blended an alternating black-and-white texture to
+uniform gray; the reproduced maximum GL/Vulkan channel difference was 128.
+
+Vulkan scene collection now retains the render-target scale, independently
+snaps each descendant translation, and snaps ordinary textured item rectangle
+edges and rounded clips before their item transforms are applied. Texture
+source coordinates remain unchanged, so the complete source maps onto the
+same device-aligned destination used by OpenGL. Already projected effect quads
+remain fractional for animations and mesh deformation. The regression uses a
+nested high-frequency texture whose right edge falls at 7.5 device pixels at
+1.25x, verifies exact source texels and transparent boundaries, and compares
+the Vulkan result directly with OpenGL under validation.
 
 ## Resolved bug: minimized window thumbnails were transparent
 

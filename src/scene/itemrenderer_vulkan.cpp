@@ -5,6 +5,7 @@
 */
 #include "itemrenderer_vulkan.h"
 
+#include "core/pixelgrid.h"
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "core/syncobjtimeline.h"
@@ -219,6 +220,7 @@ void ItemRendererVulkan::beginFrame(const RenderTarget &renderTarget, const Rend
     m_imageTarget = renderTarget.image();
     m_vulkanTarget = renderTarget.vulkanTarget();
     m_targetSize = renderTarget.size();
+    m_renderTargetScale = viewport.scale();
     m_targetColorDescription = renderTarget.colorDescription();
     m_painterTransform = transformFromMapping([&viewport](const QPointF &point) {
         return viewport.mapToRenderTarget(point);
@@ -966,8 +968,14 @@ void ItemRendererVulkan::collectItem(Item *item,
         return;
     }
 
+    // Match the OpenGL renderer's device-pixel snapping. The root position is
+    // already snapped in renderItem(), while every descendant translation is
+    // independently snapped before its parent transform is applied.
+    const QPointF itemPosition = isRoot
+        ? item->position()
+        : snapToPixels(item->position(), m_renderTargetScale);
     QTransform itemTransform = item->transform();
-    itemTransform *= QTransform::fromTranslate(item->position().x(), item->position().y());
+    itemTransform *= QTransform::fromTranslate(itemPosition.x(), itemPosition.y());
     QTransform transform = itemTransform;
     transform *= parentTransform;
     const bool unmodulatedGroupItem = m_activeBackdropBlurGroup
@@ -1063,6 +1071,24 @@ void ItemRendererVulkan::appendTextureLayer(const QRectF &rect,
     if (!texture || !texture->nativeTexture()) {
         return;
     }
+    // Item geometry is expressed in logical coordinates. OpenGL rounds each
+    // quad vertex after applying the render-target scale; do the equivalent
+    // here before the item transform maps the layer to output pixels. Source
+    // coordinates intentionally remain unchanged so the complete source is
+    // sampled over the snapped destination rectangle.
+    const QRectF snappedRect = snapToPixels(rect, m_renderTargetScale);
+    if (snappedRect.isEmpty()) {
+        return;
+    }
+    const std::optional<QRectF> snappedRoundedRect = roundedClip
+        ? std::optional(snapToPixels(roundedClip->rect, m_renderTargetScale))
+        : std::nullopt;
+    const QVector4D snappedCornerRadii = roundedClip
+        ? QVector4D(snapToPixels(roundedClip->radii.x(), m_renderTargetScale),
+                    snapToPixels(roundedClip->radii.y(), m_renderTargetScale),
+                    snapToPixels(roundedClip->radii.z(), m_renderTargetScale),
+                    snapToPixels(roundedClip->radii.w(), m_renderTargetScale))
+        : QVector4D{};
     if (texture->releasePoint()) {
         m_releasePoints.insert(texture->releasePoint());
     }
@@ -1075,7 +1101,7 @@ void ItemRendererVulkan::appendTextureLayer(const QRectF &rect,
         texturePlanes[i] = nativeTextures[i].get();
     }
     m_layers.push_back(VulkanCompositorLayer{
-        .rect = rect,
+        .rect = snappedRect,
         .texture = texture->nativeTexture(),
         .texturePlanes = texturePlanes,
         .texturePlaneCount = uint32_t(nativeTextures.size()),
@@ -1086,8 +1112,8 @@ void ItemRendererVulkan::appendTextureLayer(const QRectF &rect,
         .textureTransform = textureTransform,
         .brightness = brightness,
         .saturation = saturation,
-        .roundedRect = roundedClip ? std::optional(roundedClip->rect) : std::nullopt,
-        .cornerRadii = roundedClip ? roundedClip->radii : QVector4D{},
+        .roundedRect = snappedRoundedRect,
+        .cornerRadii = snappedCornerRadii,
         .colorDescription = colorDescription,
         .renderingIntent = renderingIntent,
         .opaque = opaque,

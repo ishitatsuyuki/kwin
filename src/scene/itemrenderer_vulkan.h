@@ -250,6 +250,7 @@ private:
     QImage *m_imageTarget = nullptr;
     VulkanRenderTarget *m_vulkanTarget = nullptr;
     QSize m_targetSize;
+    qreal m_renderTargetScale = 1.0;
     std::shared_ptr<ColorDescription> m_targetColorDescription;
     Region m_damage;
     std::unordered_set<std::shared_ptr<SyncReleasePoint>> m_releasePoints;
